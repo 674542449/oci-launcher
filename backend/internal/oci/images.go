@@ -66,7 +66,7 @@ func GetTop2UbuntuImages(ctx context.Context, profile *storage.OCIProfile, shape
 	versionMap := make(map[string]UbuntuImageInfo) // version -> latest image
 
 	for _, img := range resp.Items {
-		name := common.StringToEmptyString(img.DisplayName)
+		name := StrVal(img.DisplayName)
 		lowerName := strings.ToLower(name)
 
 		// 1. Must be official Canonical Ubuntu standard release
@@ -93,7 +93,7 @@ func GetTop2UbuntuImages(ctx context.Context, profile *storage.OCIProfile, shape
 				createdStr = img.TimeCreated.Format(time.RFC3339)
 			}
 			versionMap[version] = UbuntuImageInfo{
-				OCID:         common.StringToEmptyString(img.Id),
+				OCID:         StrVal(img.Id),
 				DisplayName:  name,
 				Version:      version,
 				Architecture: targetArch,
@@ -123,8 +123,8 @@ func GetTop2UbuntuImages(ctx context.Context, profile *storage.OCIProfile, shape
 		for i := 0; i < len(resp.Items) && i < 2; i++ {
 			img := resp.Items[i]
 			results = append(results, UbuntuImageInfo{
-				OCID:         common.StringToEmptyString(img.Id),
-				DisplayName:  common.StringToEmptyString(img.DisplayName),
+				OCID:         StrVal(img.Id),
+				DisplayName:  StrVal(img.DisplayName),
 				Version:      "Latest",
 				Architecture: targetArch,
 			})
