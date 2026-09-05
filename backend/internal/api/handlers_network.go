@@ -199,3 +199,85 @@ func AllowCloudflareCDN(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "已成功批量放行 Cloudflare 官方 IPv4/IPv6 节点的 80/443 入站！"})
 }
+
+type AddSecurityRuleRequest struct {
+	ProfileID      uint   `json:"profile_id" binding:"required"`
+	Region         string `json:"region" binding:"required"`
+	SecurityListID string `json:"security_list_id" binding:"required"`
+	Protocol       string `json:"protocol" binding:"required,oneof=tcp udp icmp all"`
+	Source         string `json:"source" binding:"required,max=64"`
+	PortMin        int    `json:"port_min" binding:"min=0,max=65535"`
+	PortMax        int    `json:"port_max" binding:"min=0,max=65535"`
+	Description    string `json:"description" binding:"max=255"`
+	IsStateless    bool   `json:"is_stateless"`
+}
+
+type DeleteSecurityRuleRequest struct {
+	ProfileID      uint   `json:"profile_id" binding:"required"`
+	Region         string `json:"region" binding:"required"`
+	SecurityListID string `json:"security_list_id" binding:"required"`
+	Key            string `json:"key" binding:"required"`
+}
+
+// AddSecurityRule adds one ingress rule to a security list
+func AddSecurityRule(c *gin.Context) {
+	var req AddSecurityRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "入参校验未通过: " + err.Error()})
+		return
+	}
+
+	var profile storage.OCIProfile
+	if err := storage.DB.First(&profile, req.ProfileID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+		return
+	}
+
+	added, err := oci.AddSecurityRule(c.Request.Context(), &profile, req.Region, req.SecurityListID, oci.IngressRuleSpec{
+		Protocol:    req.Protocol,
+		Source:      req.Source,
+		PortMin:     req.PortMin,
+		PortMax:     req.PortMax,
+		Description: req.Description,
+		IsStateless: req.IsStateless,
+	})
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "添加规则失败: " + err.Error()})
+		return
+	}
+
+	storage.LogAudit("FIREWALL_ADD_RULE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
+		fmt.Sprintf("%s %s %d-%d on %s", req.Protocol, req.Source, req.PortMin, req.PortMax, req.SecurityListID), "SUCCESS")
+
+	msg := "规则已添加"
+	if !added {
+		msg = "相同的规则已存在，未重复添加"
+	}
+	c.JSON(http.StatusOK, gin.H{"message": msg, "added": added})
+}
+
+// DeleteSecurityRule removes one ingress rule (identified by the key from the rule list)
+func DeleteSecurityRule(c *gin.Context) {
+	var req DeleteSecurityRuleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	var profile storage.OCIProfile
+	if err := storage.DB.First(&profile, req.ProfileID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+		return
+	}
+
+	removed, err := oci.DeleteSecurityRule(c.Request.Context(), &profile, req.Region, req.SecurityListID, req.Key)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "删除规则失败: " + err.Error()})
+		return
+	}
+
+	storage.LogAudit("FIREWALL_DELETE_RULE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
+		fmt.Sprintf("%s on %s", req.Key, req.SecurityListID), "SUCCESS")
+
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已删除 %d 条规则", removed)})
+}

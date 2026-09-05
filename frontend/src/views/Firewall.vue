@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="防火墙" description="查看并批量修改子网安全列表（Security List）的入站规则。">
+    <PageHeader title="防火墙" description="查看并修改子网安全列表（Security List）的入站规则。">
       <template #actions>
         <n-button secondary :loading="operating" :disabled="!selectedSecListID" @click="handleAllowCloudflare">
           <template #icon><n-icon><ShieldCheckmarkOutline /></n-icon></template>
@@ -8,6 +8,10 @@
         </n-button>
         <n-button secondary type="success" :loading="operating" :disabled="!selectedSecListID" @click="handleAllowAll">放通全部</n-button>
         <n-button secondary type="error" :loading="operating" :disabled="!selectedSecListID" @click="handleClearAll">清空入站规则</n-button>
+        <n-button type="primary" :disabled="!selectedSecListID" @click="openAddModal">
+          <template #icon><n-icon><AddOutline /></n-icon></template>
+          添加规则
+        </n-button>
       </template>
     </PageHeader>
 
@@ -36,7 +40,7 @@
       <div class="card-head card-pad pb-4">
         <div>
           <h2 class="section-title">入站规则</h2>
-          <p class="caption">Ingress rules · 共 {{ rules.length }} 条</p>
+          <p class="caption">Ingress rules · 共 {{ rules.length }} 条 · 上限 200 条</p>
         </div>
         <n-button size="small" secondary :loading="loading" :disabled="!selectedSecListID" @click="fetchRules">
           <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -55,13 +59,15 @@
       <EmptyState
         v-else-if="!selectedSecListID"
         title="先选择一个 VCN 和子网"
-        description="没有 VCN？在「抢机任务」页面可以一键创建推荐网络。"
+        description="没有 VCN？在「创建实例」页面可以一键创建推荐网络。"
       />
       <EmptyState
         v-else-if="rules.length === 0"
         title="这个安全列表没有任何入站规则"
-        description="外部网络目前无法连接任何端口。用上方按钮放通规则。"
-      />
+        description="外部网络目前无法连接任何端口。点右上角「添加规则」放行需要的端口。"
+      >
+        <n-button type="primary" @click="openAddModal">添加规则</n-button>
+      </EmptyState>
       <div v-else class="tbl-wrap border-t border-line">
         <table class="tbl">
           <thead>
@@ -71,27 +77,67 @@
               <th>目标端口</th>
               <th>说明</th>
               <th>状态跟踪</th>
+              <th class="text-right">操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="(r, idx) in rules" :key="idx">
+            <tr v-for="r in rules" :key="r.key || r.protocol + r.source + r.port_range">
               <td><code class="mono rounded px-1.5 py-0.5 text-xs font-semibold" :class="protoClass(r.protocol)">{{ r.protocol }}</code></td>
               <td class="mono text-[13px] font-medium text-ink">{{ r.source }}</td>
               <td class="mono text-[13px] text-ink">{{ r.port_range || 'ALL' }}</td>
               <td class="text-ink-2">{{ r.description || '—' }}</td>
               <td class="text-xs text-ink-3">{{ r.is_stateless ? '无状态' : '有状态' }}</td>
+              <td class="text-right whitespace-nowrap">
+                <n-button size="small" quaternary type="error" :disabled="!r.key" :loading="deletingKey === r.key" @click="confirmDeleteRule(r)">删除</n-button>
+              </td>
             </tr>
           </tbody>
         </table>
       </div>
     </div>
+
+    <!-- Add rule -->
+    <n-modal v-model:show="showAddModal" preset="card" title="添加入站规则" style="max-width: 520px" :bordered="false">
+      <n-form label-placement="top" :show-feedback="false" @submit.prevent="submitAddRule">
+        <div class="space-y-4">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <n-form-item label="协议">
+              <n-select v-model:value="addForm.protocol" :options="protocolOptions" />
+            </n-form-item>
+            <n-form-item label="来源 IP / CIDR">
+              <n-input v-model:value="addForm.source" class="mono" placeholder="0.0.0.0/0" :input-props="{ spellcheck: 'false' }" />
+            </n-form-item>
+          </div>
+          <p class="caption -mt-2">来源填单个 IP 会自动补成 /32；IPv6 全部为 <code class="mono">::/0</code>，IPv4 全部为 <code class="mono">0.0.0.0/0</code>。</p>
+
+          <n-form-item v-if="addForm.protocol === 'tcp' || addForm.protocol === 'udp'" label="目标端口">
+            <n-input v-model:value="addForm.ports" class="mono" placeholder="单个端口 22，或范围 8000-8100，留空表示全部端口" :input-props="{ spellcheck: 'false' }" />
+          </n-form-item>
+
+          <n-form-item label="说明（可选）">
+            <n-input v-model:value="addForm.description" placeholder="例如：SSH、Web、WireGuard" maxlength="255" />
+          </n-form-item>
+
+          <n-checkbox v-model:checked="addForm.is_stateless">无状态规则（一般不需要勾选）</n-checkbox>
+
+          <div v-if="addPreview" class="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2">
+            将添加：<span class="mono text-ink">{{ addPreview }}</span>
+          </div>
+
+          <div class="flex justify-end gap-2 border-t border-line pt-4">
+            <n-button @click="showAddModal = false">取消</n-button>
+            <n-button type="primary" attr-type="submit" :loading="adding">添加</n-button>
+          </div>
+        </div>
+      </n-form>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
-import { NButton, NIcon, NSelect, NSkeleton, useMessage, useDialog } from 'naive-ui'
-import { ShieldCheckmarkOutline, RefreshOutline } from '@vicons/ionicons5'
+import { NButton, NIcon, NSelect, NSkeleton, NModal, NForm, NFormItem, NInput, NCheckbox, useMessage, useDialog } from 'naive-ui'
+import { ShieldCheckmarkOutline, RefreshOutline, AddOutline } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
 import PageHeader from '@/components/PageHeader.vue'
@@ -104,12 +150,24 @@ const dialog = useDialog()
 const loading = ref(false)
 const loadingNets = ref(false)
 const operating = ref(false)
+const deletingKey = ref('')
 const selectedVCN = ref<string | null>(null)
 const selectedSubnet = ref<string | null>(null)
 const selectedSecListID = ref('')
 const vcnOptions = ref<any[]>([])
 const subnets = ref<any[]>([])
 const rules = ref<any[]>([])
+
+const showAddModal = ref(false)
+const adding = ref(false)
+const addForm = ref({ protocol: 'tcp', source: '0.0.0.0/0', ports: '', description: '', is_stateless: false })
+
+const protocolOptions = [
+  { label: 'TCP', value: 'tcp' },
+  { label: 'UDP', value: 'udp' },
+  { label: 'ICMP（ping 等）', value: 'icmp' },
+  { label: '全部协议', value: 'all' },
+]
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 
@@ -123,9 +181,33 @@ const protoClass = (p: string) => {
   const u = (p || '').toUpperCase()
   if (u === 'TCP') return 'bg-info-soft text-info'
   if (u === 'UDP') return 'bg-warn-soft text-warn'
-  if (u === 'ICMP' || u.startsWith('ICMP')) return 'bg-surface-2 text-ink-2'
+  if (u.startsWith('ICMP')) return 'bg-surface-2 text-ink-2'
   return 'bg-brand-soft text-brand'
 }
+
+// "22" -> [22,22]; "8000-8100" -> [8000,8100]; "" -> [0,0] (all ports)
+const parsePorts = (s: string): [number, number] | null => {
+  const t = s.trim()
+  if (!t) return [0, 0]
+  const m = t.match(/^(\d{1,5})(?:\s*-\s*(\d{1,5}))?$/)
+  if (!m) return null
+  const lo = Number(m[1])
+  const hi = m[2] ? Number(m[2]) : lo
+  if (lo < 1 || hi > 65535 || lo > hi) return null
+  return [lo, hi]
+}
+
+const addPreview = computed(() => {
+  const f = addForm.value
+  const proto = f.protocol.toUpperCase()
+  const src = f.source.trim() || '?'
+  if (f.protocol === 'tcp' || f.protocol === 'udp') {
+    const p = parsePorts(f.ports)
+    const ports = p === null ? '端口格式错误' : p[0] === 0 ? '全部端口' : p[0] === p[1] ? `端口 ${p[0]}` : `端口 ${p[0]}-${p[1]}`
+    return `${proto} 来自 ${src} → ${ports}`
+  }
+  return `${proto} 来自 ${src}`
+})
 
 const resetTarget = () => {
   selectedVCN.value = null
@@ -227,6 +309,76 @@ const handleClearAll = () => {
 }
 
 const handleAllowCloudflare = () => runFirewallAction('/network/allow-cloudflare')
+
+const openAddModal = () => {
+  addForm.value = { protocol: 'tcp', source: '0.0.0.0/0', ports: '', description: '', is_stateless: false }
+  showAddModal.value = true
+}
+
+const submitAddRule = async () => {
+  const f = addForm.value
+  if (!f.source.trim()) {
+    message.warning('请填写来源 IP 或 CIDR')
+    return
+  }
+  let portMin = 0
+  let portMax = 0
+  if (f.protocol === 'tcp' || f.protocol === 'udp') {
+    const p = parsePorts(f.ports)
+    if (p === null) {
+      message.warning('端口格式不对：填单个端口如 22，或范围如 8000-8100')
+      return
+    }
+    ;[portMin, portMax] = p
+  }
+  adding.value = true
+  try {
+    const res: any = await api.post('/network/security-rules/add', {
+      profile_id: profileStore.activeProfileId,
+      region: currentProfile.value?.region,
+      security_list_id: selectedSecListID.value,
+      protocol: f.protocol,
+      source: f.source.trim(),
+      port_min: portMin,
+      port_max: portMax,
+      description: f.description.trim(),
+      is_stateless: f.is_stateless,
+    })
+    message.success(res.message || '规则已添加')
+    showAddModal.value = false
+    await fetchRules()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    adding.value = false
+  }
+}
+
+const confirmDeleteRule = (r: any) => {
+  dialog.warning({
+    title: '删除这条入站规则',
+    content: `${r.protocol} 来自 ${r.source}，端口 ${r.port_range || 'ALL'}${r.description ? '（' + r.description + '）' : ''}。删除后对应端口将无法从外部访问。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      deletingKey.value = r.key
+      try {
+        const res: any = await api.post('/network/security-rules/delete', {
+          profile_id: profileStore.activeProfileId,
+          region: currentProfile.value?.region,
+          security_list_id: selectedSecListID.value,
+          key: r.key,
+        })
+        message.success(res.message || '规则已删除')
+        await fetchRules()
+      } catch (e: any) {
+        message.error(e.message)
+      } finally {
+        deletingKey.value = ''
+      }
+    },
+  })
+}
 
 watch(
   () => profileStore.activeProfileId,

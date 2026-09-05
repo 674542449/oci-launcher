@@ -67,11 +67,152 @@ type SubnetItem struct {
 }
 
 type SecurityRuleItem struct {
+	Key         string `json:"key"` // identifies the rule for single-rule deletion
 	Protocol    string `json:"protocol"`
 	Source      string `json:"source"`
 	Description string `json:"description"`
 	PortRange   string `json:"port_range"`
 	IsStateless bool   `json:"is_stateless"`
+}
+
+// IngressRuleSpec is a single user-defined ingress rule.
+type IngressRuleSpec struct {
+	Protocol    string // tcp, udp, icmp, all
+	Source      string // CIDR (a bare IP is accepted and turned into /32 or /128)
+	PortMin     int    // tcp/udp only; 0 = all ports
+	PortMax     int
+	Description string
+	IsStateless bool
+}
+
+// NormalizeCIDR accepts "1.2.3.4", "1.2.3.0/24", "2001:db8::1" or "::/0" and returns canonical CIDR notation.
+func NormalizeCIDR(s string) (string, bool, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", false, fmt.Errorf("来源不能为空")
+	}
+	if !strings.Contains(s, "/") {
+		ip := net.ParseIP(s)
+		if ip == nil {
+			return "", false, fmt.Errorf("来源 %q 不是合法的 IP 或 CIDR", s)
+		}
+		if ip.To4() != nil {
+			return ip.String() + "/32", false, nil
+		}
+		return ip.String() + "/128", true, nil
+	}
+	ip, ipNet, err := net.ParseCIDR(s)
+	if err != nil {
+		return "", false, fmt.Errorf("来源 %q 不是合法的 CIDR", s)
+	}
+	isV6 := ip.To4() == nil
+	return ipNet.String(), isV6, nil
+}
+
+// BuildIngressRule validates a spec and turns it into an SDK rule.
+func BuildIngressRule(spec IngressRuleSpec) (core.IngressSecurityRule, error) {
+	source, isV6, err := NormalizeCIDR(spec.Source)
+	if err != nil {
+		return core.IngressSecurityRule{}, err
+	}
+
+	rule := core.IngressSecurityRule{
+		Source:     common.String(source),
+		SourceType: core.IngressSecurityRuleSourceTypeCidrBlock,
+	}
+	if d := strings.TrimSpace(spec.Description); d != "" {
+		if len(d) > 255 {
+			d = d[:255]
+		}
+		rule.Description = common.String(d)
+	}
+	if spec.IsStateless {
+		rule.IsStateless = common.Bool(true)
+	}
+
+	var portRange *core.PortRange
+	if spec.PortMin > 0 || spec.PortMax > 0 {
+		lo, hi := spec.PortMin, spec.PortMax
+		if hi == 0 {
+			hi = lo
+		}
+		if lo == 0 {
+			lo = hi
+		}
+		if lo < 1 || hi > 65535 || lo > hi {
+			return core.IngressSecurityRule{}, fmt.Errorf("端口范围无效: %d-%d（1-65535，且起始不大于结束）", lo, hi)
+		}
+		portRange = &core.PortRange{Min: common.Int(lo), Max: common.Int(hi)}
+	}
+
+	switch strings.ToLower(strings.TrimSpace(spec.Protocol)) {
+	case "tcp", "6":
+		rule.Protocol = common.String("6")
+		if portRange != nil {
+			rule.TcpOptions = &core.TcpOptions{DestinationPortRange: portRange}
+		}
+	case "udp", "17":
+		rule.Protocol = common.String("17")
+		if portRange != nil {
+			rule.UdpOptions = &core.UdpOptions{DestinationPortRange: portRange}
+		}
+	case "icmp", "1", "58", "icmpv6":
+		if isV6 {
+			rule.Protocol = common.String("58") // ICMPv6 for IPv6 sources
+		} else {
+			rule.Protocol = common.String("1")
+		}
+	case "all", "":
+		rule.Protocol = common.String("all")
+	default:
+		return core.IngressSecurityRule{}, fmt.Errorf("协议 %q 不支持，可选 tcp / udp / icmp / all", spec.Protocol)
+	}
+	return rule, nil
+}
+
+// AddSecurityRule adds one ingress rule to a security list (no-op if an identical rule exists).
+func AddSecurityRule(ctx context.Context, profile *storage.OCIProfile, region, secListID string, spec IngressRuleSpec) (added bool, err error) {
+	rule, err := BuildIngressRule(spec)
+	if err != nil {
+		return false, err
+	}
+	n, err := applyIngressRules(ctx, profile, region, secListID, []core.IngressSecurityRule{rule})
+	return n > 0, err
+}
+
+// DeleteSecurityRule removes the ingress rule identified by key (from ListSecurityRules).
+func DeleteSecurityRule(ctx context.Context, profile *storage.OCIProfile, region, secListID, key string) (removed int, err error) {
+	netClient, err := GetVirtualNetworkClient(profile, region)
+	if err != nil {
+		return 0, err
+	}
+	getResp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
+	if err != nil {
+		return 0, err
+	}
+
+	kept := make([]core.IngressSecurityRule, 0, len(getResp.SecurityList.IngressSecurityRules))
+	for _, r := range getResp.SecurityList.IngressSecurityRules {
+		if ruleKey(r) == key {
+			removed++
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if removed == 0 {
+		return 0, fmt.Errorf("规则不存在或已被删除，请刷新列表")
+	}
+
+	_, err = netClient.UpdateSecurityList(ctx, core.UpdateSecurityListRequest{
+		SecurityListId: common.String(secListID),
+		UpdateSecurityListDetails: core.UpdateSecurityListDetails{
+			IngressSecurityRules: kept,
+		},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 // ListVCNs lists VCNs in the tenancy root compartment (all pages)
@@ -415,6 +556,7 @@ func ListSecurityRules(ctx context.Context, profile *storage.OCIProfile, region,
 	items := make([]SecurityRuleItem, 0, len(resp.SecurityList.IngressSecurityRules))
 	for _, rule := range resp.SecurityList.IngressSecurityRules {
 		items = append(items, SecurityRuleItem{
+			Key:         ruleKey(rule),
 			Protocol:    protocolName(StrVal(rule.Protocol)),
 			Source:      StrVal(rule.Source),
 			Description: StrVal(rule.Description),

@@ -121,6 +121,8 @@ func SetupRouter() *gin.Engine {
 			protected.GET("/network/ads", ListAvailabilityDomains)
 			protected.POST("/network/create-default-vcn", CreateDefaultVCN)
 			protected.GET("/network/security-rules", ListSecurityRules)
+			protected.POST("/network/security-rules/add", AddSecurityRule)
+			protected.POST("/network/security-rules/delete", DeleteSecurityRule)
 			protected.POST("/network/allow-all", AllowAllFirewall)
 			protected.POST("/network/clear-all", ClearAllFirewall)
 			protected.POST("/network/allow-cloudflare", AllowCloudflareCDN)
