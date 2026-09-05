@@ -11,8 +11,8 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
+	"github.com/oracle/oci-go-sdk/v65/identity"
 	"github.com/oracle/oci-go-sdk/v65/limits"
-	"github.com/oracle/oci-go-sdk/v65/osubsubscription"
 )
 
 type AccountTypeInfo struct {
@@ -42,30 +42,13 @@ type QuotaSummary struct {
 	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
-// DetectAccountType executes dual-track detection: Official OSub API first, Limits API fallback
+// DetectAccountType executes account type detection via Limits API
 func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*AccountTypeInfo, error) {
 	info := &AccountTypeInfo{
 		DetectedType: "FREE_TIER",
 	}
 
-	// 1. Primary: Try Official OneSubscription API
-	subClient, err := GetSubscriptionClient(profile)
-	if err == nil {
-		req := osubsubscription.ListSubscriptionsRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-		}
-		resp, err2 := subClient.ListSubscriptions(ctx, req)
-		if err2 == nil && len(resp.Items) > 0 {
-			firstSub := resp.Items[0]
-			subType := strings.ToUpper(StrVal(firstSub.Type))
-			if subType != "" {
-				info.DetectedType = subType
-				info.DetectionReason = fmt.Sprintf("官方 OneSubscription API 认证: Type = %s (计划编号: %s)", subType, StrVal(firstSub.PlanNumber))
-			}
-		}
-	}
-
-	// 2. Secondary / Complementary: Read standard-a1-core-count from Limits API
+	// 1. Read standard-a1-core-count and memory from Limits API
 	limitsClient, err := GetLimitsClient(profile)
 	if err == nil {
 		req := limits.ListLimitValuesRequest{
@@ -86,15 +69,13 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*Accou
 		}
 	}
 
-	// If OSub API was inaccessible, use Limits API result
-	if info.DetectionReason == "" {
-		if info.A1CoreLimit >= 4 {
-			info.DetectedType = "PAYG"
-			info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (>= 4 判定为已升级 PAYG)", info.A1CoreLimit)
-		} else {
-			info.DetectedType = "FREE_TIER"
-			info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (<= 2 判定为未升级免费号)", info.A1CoreLimit)
-		}
+	// Determine type based on A1 compute limits
+	if info.A1CoreLimit >= 4 {
+		info.DetectedType = "PAYG"
+		info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (>= 4 判定为已升级 PAYG)", info.A1CoreLimit)
+	} else {
+		info.DetectedType = "FREE_TIER"
+		info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (<= 2 判定为未升级免费号)", info.A1CoreLimit)
 	}
 
 	// Determine effective type based on manual override
@@ -104,7 +85,7 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*Accou
 		info.DetectionReason += " [用户已手动覆盖为: PAYG]"
 	} else if override == "free" {
 		info.EffectiveType = "free"
-		info.DetectionReason += " [用户已手动覆盖为: Always Free]"
+		info.DetectionReason += " [用户已手动覆盖为: FREE_TIER]"
 	} else {
 		if info.DetectedType == "PAYG" {
 			info.EffectiveType = "payg"
