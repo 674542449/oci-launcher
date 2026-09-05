@@ -46,7 +46,7 @@ func ClassifyError(err error) (ErrorCategory, string) {
 		switch {
 		case status == 429:
 			return CategoryRateLimited, fmt.Sprintf("请求被限流 (429 %s)，启动指数退避", code)
-		case status == 500 && (strings.Contains(lowerMsg, "out of host capacity") || strings.Contains(lowerMsg, "out of capacity")):
+		case status == 500 && oci.IsCapacityMessage(lowerMsg):
 			return CategoryCapacityFull, "容量不足 (Out of host capacity)，等待下次轮询"
 		case status == 500 || status == 502 || status == 503 || status == 504:
 			return CategoryTransient, fmt.Sprintf("OCI 服务端临时错误 (%d %s)，稍后重试: %s", status, code, msg)

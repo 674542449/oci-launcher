@@ -95,9 +95,14 @@ func ListTasks(c *gin.Context) {
 			"last_message": "创建流程被中断，未确认结果。请到「实例」页确认，需要时点「排队重试」",
 		})
 
+	// One FinalizeLaunch run is bounded by engine.ProvisionWatchTimeout; a "provisioning" row
+	// older than that lost its watcher. The instance most likely exists, so do not invite a retry.
 	storage.DB.Model(&storage.LaunchTask{}).
-		Where("status = ? AND success_instance_ocid <> ''", "creating").
-		Updates(map[string]interface{}{"status": "success"})
+		Where("status = ? AND updated_at < ?", "provisioning", time.Now().Add(-(engine.ProvisionWatchTimeout + 5*time.Minute))).
+		Updates(map[string]interface{}{
+			"status":       "success",
+			"last_message": "开通结果未能确认，请到「实例」页查看实际状态",
+		})
 
 	query := storage.DB.Order("created_at DESC")
 	if raw := c.Query("profile_id"); raw != "" {
@@ -266,31 +271,28 @@ func CreateTask(c *gin.Context) {
 	}
 
 	if last.Success {
-		msg := "实例已创建，正在等待网络就绪"
-		if last.AlreadyExisted {
-			msg = "云端已存在同名实例，视为创建成功"
-		}
-		updateTask(task.ID, map[string]interface{}{
-			"status":                "success",
-			"success_instance_ocid": last.InstanceOCID,
-			"last_message":          msg,
-		})
-		task.Status, task.SuccessInstanceOCID, task.LastMessage = "success", last.InstanceOCID, msg
+		// Accepted, not yet running: the task is "provisioning" until the instance is RUNNING.
+		fields := engine.ProvisioningFields(last.InstanceOCID, last.AlreadyExisted)
+		msg := fields["last_message"].(string)
+		updateTask(task.ID, fields)
+		task.Status, task.SuccessInstanceOCID, task.LastMessage = "provisioning", last.InstanceOCID, msg
 		releaseLock()
 		finalized = true
 
-		// Wait for RUNNING + public IP in the background, then notify
+		// Follow it to RUNNING in the background; a provisioning failure becomes a retryable stop.
 		taskCopy := task
 		profileCopy := profile
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[Task] FinalizeSuccess panic for %s: %v", taskCopy.ID, r)
+					log.Printf("[Task] FinalizeLaunch panic for %s: %v", taskCopy.ID, r)
 				}
 			}()
-			bg, cancelBg := context.WithTimeout(context.Background(), 6*time.Minute)
+			bg, cancelBg := context.WithTimeout(context.Background(), engine.ProvisionWatchTimeout)
 			defer cancelBg()
-			engine.FinalizeSuccess(bg, &profileCopy, &taskCopy, last, attempts, rootPassword)
+			if engine.FinalizeLaunch(bg, &profileCopy, &taskCopy, last, attempts, rootPassword) == engine.OutcomeProvisionFailed {
+				engine.MarkProvisionFailed(&taskCopy, &profileCopy)
+			}
 		}()
 
 		c.JSON(http.StatusOK, gin.H{
@@ -345,6 +347,10 @@ func StartExistingTask(c *gin.Context) {
 	}
 	if task.Status == "success" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "该任务已经成功创建实例，请新建任务"})
+		return
+	}
+	if task.Status == "creating" || task.Status == "provisioning" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "实例正在创建或开通中，请等待结果"})
 		return
 	}
 	if task.Status == "running" && engine.IsTaskActive(taskID) {

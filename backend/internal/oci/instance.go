@@ -3,6 +3,7 @@ package oci
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -291,12 +292,58 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		}
 	}
 
-	resp, err := computeClient.LaunchInstance(ctx, core.LaunchInstanceRequest{LaunchInstanceDetails: details})
+	// The SDK stamps one opc-retry-token on this call, so the in-call retries below can never
+	// create a second instance: a retried request that already went through returns the same one.
+	policy := launchRetryPolicy()
+	resp, err := computeClient.LaunchInstance(ctx, core.LaunchInstanceRequest{
+		LaunchInstanceDetails: details,
+		RequestMetadata:       common.RequestMetadata{RetryPolicy: &policy},
+	})
 	if err != nil {
 		return "", err
 	}
 
 	return StrVal(resp.Instance.Id), nil
+}
+
+// launchRetryPolicy retries a single LaunchInstance call (up to 3 attempts, 3 s / 6 s apart)
+// on network errors, timeouts and 5xx answers whose outcome is unknown. Capacity (500 "out of
+// host capacity") and 429 are deliberately not retried here: the engine rotates availability
+// domains and backs off for those.
+func launchRetryPolicy() common.RetryPolicy {
+	shouldRetry := func(r common.OCIOperationResponse) bool {
+		if r.Error == nil {
+			return false
+		}
+		if errors.Is(r.Error, context.Canceled) || errors.Is(r.Error, context.DeadlineExceeded) {
+			return false
+		}
+		if se, ok := common.IsServiceError(r.Error); ok {
+			code := se.GetHTTPStatusCode()
+			switch {
+			case code == 429, code == 501:
+				return false
+			case code == 500 && IsCapacityMessage(se.GetMessage()):
+				return false
+			case code >= 500:
+				return true
+			case code == 409 && se.GetCode() == "IncorrectState":
+				return true
+			}
+			return false
+		}
+		return true // transport-level failure: safe to retry with the same token
+	}
+	next := func(r common.OCIOperationResponse) time.Duration {
+		return time.Duration(3*int(r.AttemptNumber)) * time.Second
+	}
+	return common.NewRetryPolicy(3, shouldRetry, next)
+}
+
+// IsCapacityMessage tells whether an OCI error message is the free-tier capacity answer.
+func IsCapacityMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "out of host capacity") || strings.Contains(lower, "out of capacity")
 }
 
 // InstanceAction performs START, STOP (graceful), SOFTRESET, RESET
@@ -536,6 +583,40 @@ func GetInstanceAddresses(ctx context.Context, profile *storage.OCIProfile, regi
 		}
 	}
 	return state, pubIP, ipv6, nil
+}
+
+// GetInstanceState returns only the lifecycle state (one GetInstance call).
+func GetInstanceState(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (string, error) {
+	computeClient, err := GetComputeClient(profile, region)
+	if err != nil {
+		return "", err
+	}
+	resp, err := computeClient.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(instanceOCID)})
+	if err != nil {
+		return "", err
+	}
+	return string(resp.Instance.LifecycleState), nil
+}
+
+// GetPrimaryVnicAddresses returns the primary VNIC's public IPv4 and first IPv6 address.
+func GetPrimaryVnicAddresses(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (pubIP, ipv6 string, err error) {
+	computeClient, err := GetComputeClient(profile, region)
+	if err != nil {
+		return "", "", err
+	}
+	netClient, err := GetVirtualNetworkClient(profile, region)
+	if err != nil {
+		return "", "", err
+	}
+	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	if err != nil {
+		return "", "", err
+	}
+	pubIP = StrVal(vnic.PublicIp)
+	if len(vnic.Ipv6Addresses) > 0 {
+		ipv6 = vnic.Ipv6Addresses[0]
+	}
+	return pubIP, ipv6, nil
 }
 
 // ProbeIPPort tests a TCP connection to ip:port

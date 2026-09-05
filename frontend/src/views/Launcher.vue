@@ -24,9 +24,9 @@
         <div class="flex flex-1 flex-wrap items-center justify-between gap-3">
           <span>
             <b class="mono">{{ t.instance_name }}</b>
-            {{ t.status === 'creating' ? '正在创建…' : '排队重试中' }}
-            <span class="mono">· 第 {{ t.current_retries }} 次</span>
-            <span v-if="t.last_message" class="text-ink-2">· {{ t.last_message }}</span>
+            {{ taskStripLabel(t) }}
+            <span v-if="t.status === 'running'" class="mono">· 第 {{ t.current_retries }} 次</span>
+            <span v-if="t.status === 'running' && t.last_message" class="ml-1 text-ink-2">· {{ t.last_message }}</span>
           </span>
           <n-button size="small" secondary :type="t.status === 'running' ? 'warning' : 'default'" :loading="taskActing === t.id" @click="stopTask(t)">
             {{ t.status === 'running' ? '停止排队' : '清除' }}
@@ -300,7 +300,58 @@ const vpuOptions = [
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 const isA1 = computed(() => form.value.shape.includes('A1'))
-const activeTasks = computed(() => tasks.value.filter((t) => t.status === 'running' || t.status === 'creating'))
+// creating: synchronous LaunchInstance in flight · provisioning: accepted by OCI, not RUNNING yet
+// · running: queued retries. Only RUNNING instances make a task "success".
+const isActiveTask = (t: any) => t.status === 'running' || t.status === 'creating' || t.status === 'provisioning'
+const activeTasks = computed(() => tasks.value.filter(isActiveTask))
+const taskStripLabel = (t: any) => {
+  if (t.status === 'creating') return '正在创建…'
+  if (t.status === 'provisioning') return 'OCI 已接受，正在开通（通常 1–3 分钟）'
+  return '排队重试中'
+}
+
+// The task whose final outcome gets announced on this page: the one just created here, or an
+// active one found while polling. Cleared once announced or when the user stops/clears it.
+const watchedTaskId = ref('')
+const watchedPrevStatus = ref('')
+const announceOutcome = (t: any) => {
+  if (t.status === 'success') {
+    dialog.success({
+      title: '实例已进入运行状态',
+      content: `${t.instance_name}：${t.last_message || '已进入运行状态'}`,
+      positiveText: '知道了',
+    })
+  } else if (t.status === 'failed') {
+    dialog.error({ title: '创建失败', content: t.last_message || '未知错误', positiveText: '知道了' })
+  } else if (t.status === 'stopped' && watchedPrevStatus.value !== 'running') {
+    askAutoRetry({ task_id: t.id, reason: t.last_message || '实例开通失败', attempts: t.current_retries || 1 })
+  } else if (t.status === 'stopped') {
+    dialog.info({ title: '排队已结束', content: `${t.instance_name}：${t.last_message || '已停止'}`, positiveText: '知道了' })
+  } else {
+    return
+  }
+  watchedTaskId.value = ''
+  watchedPrevStatus.value = ''
+}
+const trackWatchedTask = () => {
+  if (!watchedTaskId.value) {
+    const pending = tasks.value.find(isActiveTask)
+    if (pending) {
+      watchedTaskId.value = pending.id
+      watchedPrevStatus.value = pending.status
+    }
+    return
+  }
+  const w = tasks.value.find((t) => t.id === watchedTaskId.value)
+  if (!w) {
+    watchedTaskId.value = ''
+    watchedPrevStatus.value = ''
+  } else if (isActiveTask(w)) {
+    watchedPrevStatus.value = w.status
+  } else {
+    announceOutcome(w)
+  }
+}
 
 const ocpuMarks = computed(() => {
   const m: Record<number, string> = {}
@@ -495,6 +546,7 @@ const fetchTasks = async () => {
   try {
     const res: any = await api.get(`/tasks?profile_id=${profileStore.activeProfileId}`)
     tasks.value = res.tasks || []
+    trackWatchedTask()
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -504,9 +556,13 @@ const fetchTasks = async () => {
 
 const stopTask = async (t: any) => {
   taskActing.value = t.id
+  if (watchedTaskId.value === t.id) {
+    watchedTaskId.value = ''
+    watchedPrevStatus.value = ''
+  }
   try {
     const res: any = await api.post(`/tasks/stop/${t.id}`)
-    message.success(t.status === 'creating' ? '已清除' : res.message || '已停止排队')
+    message.success(t.status === 'running' ? res.message || '已停止排队' : '已清除')
     await fetchTasks()
   } catch (e: any) {
     message.error(e.message)
@@ -562,12 +618,16 @@ const submitTask = async (submittedName: string) => {
       },
       { timeout: 200000 },
     )
+    if (res.result === 'created') {
+      watchedTaskId.value = res.task_id
+      watchedPrevStatus.value = 'provisioning'
+    }
     await fetchTasks()
 
     if (res.result === 'created') {
-      dialog.success({
-        title: res.existed ? '实例已存在' : '实例创建成功',
-        content: `${submittedName} 已在 OCI 创建${res.existed ? '（云端已有同名实例）' : ''}。正在等待公网 IP 分配，完成后会显示在创建记录和「实例」页面。`,
+      dialog.info({
+        title: res.existed ? '实例已存在' : 'OCI 已接受创建请求',
+        content: `${submittedName} ${res.existed ? '在云端已存在，正在确认其运行状态' : '正在开通，通常 1–3 分钟后进入运行状态'}。结果会在本页提示，也可在「实例」页查看。`,
         positiveText: '知道了',
       })
       form.value.instance_name = randomInstanceName()
@@ -644,8 +704,8 @@ const handleCreateTask = () => {
 const startPolling = () => {
   if (pollTimer) window.clearInterval(pollTimer)
   pollTimer = window.setInterval(() => {
-    if (tasks.value.some((t) => t.status === 'running' || t.status === 'creating')) fetchTasks()
-  }, 15000)
+    if (tasks.value.some(isActiveTask)) fetchTasks()
+  }, 10000)
 }
 
 const loadForProfile = async () => {
