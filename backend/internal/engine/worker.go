@@ -110,7 +110,7 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 				for _, inst := range instList.Items {
 					if inst.LifecycleState != core.InstanceLifecycleStateTerminated && inst.LifecycleState != core.InstanceLifecycleStateTerminating {
 						// Instance already created! Mark success immediately!
-						instOCID := common.StringToEmptyString(inst.Id)
+						instOCID := oci.StrVal(inst.Id)
 						log.Printf("[Engine] Found existing instance %s (%s)! Marking task success.", task.InstanceName, instOCID)
 
 						// Fetch public IP
