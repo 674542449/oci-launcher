@@ -191,10 +191,12 @@ const maskOCID = (ocid?: string) => {
   return ocid.substring(0, 10) + '…' + ocid.substring(ocid.length - 8)
 }
 const shortAD = (ad?: string) => (ad ? ad.replace(/^[^:]+:/, '') : '')
+const isFlexShape = (shape?: string) => !!shape && shape.includes('Flex')
 const formatDate = (t?: string) => {
   if (!t) return ''
   const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? t : d.toLocaleDateString('zh-CN')
+  if (Number.isNaN(d.getTime())) return t
+  return d.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 
 const copyText = async (txt: string, what = '内容') => {
@@ -213,7 +215,7 @@ const moreOptions = (inst: any): DropdownOption[] => [
   { label: '重启（软重启）', key: 'reboot', icon: icon(RefreshOutline), disabled: inst.state !== 'RUNNING' },
   { label: '更换公网 IP', key: 'rotate', icon: icon(SwapHorizontalOutline) },
   { label: '附加 IPv6', key: 'ipv6', icon: icon(GlobeOutline), disabled: !!inst.ipv6 },
-  { label: '改配 OCPU / 内存', key: 'resize', icon: icon(HardwareChipOutline) },
+  { label: '改配 OCPU / 内存', key: 'resize', icon: icon(HardwareChipOutline), disabled: !isFlexShape(inst.shape) },
   { label: '编辑 Root 密码标签', key: 'tags', icon: icon(PricetagOutline) },
   { type: 'divider', key: 'd1' },
   { label: '终止实例', key: 'terminate', icon: icon(TrashOutline), props: { style: 'color: var(--c-danger)' } },
@@ -337,6 +339,10 @@ const confirmTerminate = (inst: any) => {
 }
 
 const openResizeModal = (inst: any) => {
+  if (!isFlexShape(inst.shape)) {
+    message.info('VM.Standard.E2.1.Micro 是固定 1 OCPU / 1 GB 的规格，无法改配')
+    return
+  }
   selectedInst.value = inst
   resizeOCPU.value = inst.ocpu || 2
   resizeMemory.value = inst.memory_in_gbs || 12
