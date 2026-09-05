@@ -348,7 +348,7 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 
 	// 2. Get Private IP OCID
 	vnicResp, err := netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: vnicID})
-	if err != nil || vnicResp.Vnic == nil {
+	if err != nil {
 		return "", fmt.Errorf("unable to get VNIC detail: %w", err)
 	}
 
@@ -384,7 +384,7 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 		},
 	}
 	createResp, err := netClient.CreatePublicIp(ctx, createReq)
-	if err != nil || createResp.PublicIp == nil {
+	if err != nil {
 		return "", fmt.Errorf("failed to create new public IP: %w", err)
 	}
 
@@ -418,7 +418,7 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 		},
 	}
 	resp, err := netClient.CreateIpv6(ctx, createReq)
-	if err != nil || resp.Ipv6 == nil {
+	if err != nil {
 		return "", fmt.Errorf("failed to allocate IPv6: %w", err)
 	}
 
