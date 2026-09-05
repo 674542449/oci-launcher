@@ -63,11 +63,11 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 		}
 
 		item := InstanceItem{
-			OCID:         common.StringToEmptyString(inst.Id),
-			DisplayName:  common.StringToEmptyString(inst.DisplayName),
-			Shape:        common.StringToEmptyString(inst.Shape),
+			OCID:         StrVal(inst.Id),
+			DisplayName:  StrVal(inst.DisplayName),
+			Shape:        StrVal(inst.Shape),
 			State:        string(inst.LifecycleState),
-			AD:           common.StringToEmptyString(inst.AvailabilityDomain),
+			AD:           StrVal(inst.AvailabilityDomain),
 			Region:       region,
 			FreeformTags: inst.FreeformTags,
 		}
@@ -102,9 +102,9 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 			for _, va := range vnicResp.Items {
 				if va.LifecycleState == core.VnicAttachmentLifecycleStateAttached && va.VnicId != nil {
 					vnicDetail, err3 := netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: va.VnicId})
-					if err3 == nil && vnicDetail.Vnic != nil {
-						item.PublicIP = common.StringToEmptyString(vnicDetail.Vnic.PublicIp)
-						item.PrivateIP = common.StringToEmptyString(vnicDetail.Vnic.PrivateIp)
+					if err3 == nil {
+						item.PublicIP = StrVal(vnicDetail.Vnic.PublicIp)
+						item.PrivateIP = StrVal(vnicDetail.Vnic.PrivateIp)
 						if len(vnicDetail.Vnic.Ipv6Addresses) > 0 {
 							item.IPv6 = vnicDetail.Vnic.Ipv6Addresses[0]
 						}
@@ -236,7 +236,7 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		return "", err
 	}
 
-	return common.StringToEmptyString(resp.Instance.Id), nil
+	return StrVal(resp.Instance.Id), nil
 }
 
 // InstanceAction performs START, STOP, SOFTRESET, RESET
@@ -388,7 +388,7 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 		return "", fmt.Errorf("failed to create new public IP: %w", err)
 	}
 
-	return common.StringToEmptyString(createResp.PublicIp.IpAddress), nil
+	return StrVal(createResp.PublicIp.IpAddress), nil
 }
 
 // AttachIPv6ToInstance attaches an IPv6 address to an existing instance
@@ -422,7 +422,7 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 		return "", fmt.Errorf("failed to allocate IPv6: %w", err)
 	}
 
-	return common.StringToEmptyString(resp.Ipv6.IpAddress), nil
+	return StrVal(resp.Ipv6.IpAddress), nil
 }
 
 // ProbeIPPort tests TCP connection on port
