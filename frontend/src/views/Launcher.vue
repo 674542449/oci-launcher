@@ -28,7 +28,9 @@
             <span class="mono">· 第 {{ t.current_retries }} 次</span>
             <span v-if="t.last_message" class="text-ink-2">· {{ t.last_message }}</span>
           </span>
-          <n-button v-if="t.status === 'running'" size="small" secondary type="warning" :loading="taskActing === t.id" @click="stopTask(t)">停止排队</n-button>
+          <n-button size="small" secondary :type="t.status === 'running' ? 'warning' : 'default'" :loading="taskActing === t.id" @click="stopTask(t)">
+            {{ t.status === 'running' ? '停止排队' : '清除' }}
+          </n-button>
         </div>
       </div>
     </div>
@@ -504,7 +506,7 @@ const stopTask = async (t: any) => {
   taskActing.value = t.id
   try {
     const res: any = await api.post(`/tasks/stop/${t.id}`)
-    message.success(res.message || '已停止排队')
+    message.success(t.status === 'creating' ? '已清除' : res.message || '已停止排队')
     await fetchTasks()
   } catch (e: any) {
     message.error(e.message)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -46,6 +47,16 @@ const (
 	firstAttemptTimeout   = 150 * time.Second
 )
 
+// updateTask writes fields of one task by id and logs (instead of silently dropping) DB errors.
+func updateTask(taskID uuid.UUID, fields map[string]interface{}) {
+	res := storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Updates(fields)
+	if res.Error != nil {
+		log.Printf("[Task] update %s failed: %v", taskID, res.Error)
+	} else if res.RowsAffected == 0 {
+		log.Printf("[Task] update %s affected no rows", taskID)
+	}
+}
+
 func parseTaskID(c *gin.Context) (uuid.UUID, bool) {
 	taskID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
@@ -75,14 +86,18 @@ func acquireLockOrReject(c *gin.Context, profileID uint) bool {
 func ListTasks(c *gin.Context) {
 	var tasks []storage.LaunchTask
 
-	// A synchronous first attempt never takes longer than firstAttemptTimeout; anything still
-	// "creating" after 10 minutes was interrupted (restart, crash) and must not look alive.
+	// A synchronous first attempt is capped at firstAttemptTimeout (150 s); anything still
+	// "creating" after 3 minutes was interrupted (restart, crash) and must not look alive.
 	storage.DB.Model(&storage.LaunchTask{}).
-		Where("status = ? AND updated_at < ?", "creating", time.Now().Add(-10*time.Minute)).
+		Where("status = ? AND updated_at < ?", "creating", time.Now().Add(-3*time.Minute)).
 		Updates(map[string]interface{}{
 			"status":       "stopped",
 			"last_message": "创建流程被中断，未确认结果。请到「实例」页确认，需要时点「排队重试」",
 		})
+
+	storage.DB.Model(&storage.LaunchTask{}).
+		Where("status = ? AND success_instance_ocid <> ''", "creating").
+		Updates(map[string]interface{}{"status": "success"})
 
 	query := storage.DB.Order("created_at DESC")
 	if raw := c.Query("profile_id"); raw != "" {
@@ -204,6 +219,23 @@ func CreateTask(c *gin.Context) {
 	storage.LogAudit("CREATE_INSTANCE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
 		fmt.Sprintf("%s %s %.0fC/%.0fG %dGB in %s", task.InstanceName, task.Shape, task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, task.Region), "SUCCESS")
 
+	// Whatever happens below (panic included), the record must not stay "creating".
+	finalized := false
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Task] CreateTask panic for %s: %v", task.ID, r)
+			releaseLock()
+			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": fmt.Sprintf("创建流程异常中断: %v。请到「实例」页确认是否已创建", r)})
+			if !c.Writer.Written() {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("创建流程异常中断: %v", r)})
+			}
+			return
+		}
+		if !finalized {
+			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建流程未正常结束，请到「实例」页确认是否已创建"})
+		}
+	}()
+
 	// ---- Synchronous first attempt (detached from the HTTP request so a client disconnect
 	//      cannot leave a half-recorded attempt) ----
 	ctx, cancel := context.WithTimeout(context.Background(), firstAttemptTimeout)
@@ -213,7 +245,9 @@ func CreateTask(c *gin.Context) {
 	if err != nil {
 		releaseLock()
 		msg := "无法获取可用区列表: " + err.Error()
-		storage.DB.Model(&task).Updates(map[string]interface{}{"status": "failed", "last_message": msg})
+		updateTask(task.ID, map[string]interface{}{"status": "failed", "last_message": msg})
+		task.Status, task.LastMessage = "failed", msg
+		finalized = true
 		c.JSON(http.StatusOK, gin.H{
 			"result": "failed", "retryable": false, "reason": msg, "task_id": task.ID.String(), "task": task,
 		})
@@ -236,17 +270,24 @@ func CreateTask(c *gin.Context) {
 		if last.AlreadyExisted {
 			msg = "云端已存在同名实例，视为创建成功"
 		}
-		storage.DB.Model(&task).Updates(map[string]interface{}{
+		updateTask(task.ID, map[string]interface{}{
 			"status":                "success",
 			"success_instance_ocid": last.InstanceOCID,
 			"last_message":          msg,
 		})
+		task.Status, task.SuccessInstanceOCID, task.LastMessage = "success", last.InstanceOCID, msg
 		releaseLock()
+		finalized = true
 
 		// Wait for RUNNING + public IP in the background, then notify
 		taskCopy := task
 		profileCopy := profile
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[Task] FinalizeSuccess panic for %s: %v", taskCopy.ID, r)
+				}
+			}()
 			bg, cancelBg := context.WithTimeout(context.Background(), 6*time.Minute)
 			defer cancelBg()
 			engine.FinalizeSuccess(bg, &profileCopy, &taskCopy, last, attempts, rootPassword)
@@ -264,9 +305,11 @@ func CreateTask(c *gin.Context) {
 	}
 
 	releaseLock()
+	finalized = true
 
 	if last.Category == engine.CategoryFatalError {
-		storage.DB.Model(&task).Updates(map[string]interface{}{"status": "failed", "last_message": "创建失败: " + last.Reason})
+		updateTask(task.ID, map[string]interface{}{"status": "failed", "last_message": "创建失败: " + last.Reason})
+		task.Status, task.LastMessage = "failed", "创建失败: "+last.Reason
 		notify.NotifyTaskFatalError(&task, &profile, last.Reason)
 		c.JSON(http.StatusOK, gin.H{
 			"result": "failed", "retryable": false, "reason": last.Reason, "attempts": attempts,
@@ -279,7 +322,8 @@ func CreateTask(c *gin.Context) {
 	if last.Category == engine.CategoryCancelled {
 		reason = "创建请求超时，请重试"
 	}
-	storage.DB.Model(&task).Updates(map[string]interface{}{"status": "stopped", "last_message": "创建失败: " + reason + "（未排队）"})
+	updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建失败: " + reason + "（未排队）"})
+	task.Status, task.LastMessage = "stopped", "创建失败: "+reason+"（未排队）"
 	c.JSON(http.StatusOK, gin.H{
 		"result": "failed", "retryable": true, "reason": reason, "attempts": attempts,
 		"task_id": task.ID.String(), "task": task,

@@ -81,7 +81,16 @@ func StopTask(taskID uuid.UUID) {
 		Where("id = ? AND status = ?", taskID, "running").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
-			"last_message": "用户手动停止抢机任务",
+			"last_message": "用户手动停止排队",
+		}).Error
+
+	// A record stuck in the synchronous "creating" state can be cleared by the user as well;
+	// if the create flow is in fact still running, its own final write wins afterwards.
+	_ = storage.DB.Model(&storage.LaunchTask{}).
+		Where("id = ? AND status = ?", taskID, "creating").
+		Updates(map[string]interface{}{
+			"status":       "stopped",
+			"last_message": "用户手动清除，请到「实例」页确认结果",
 		}).Error
 }
 
