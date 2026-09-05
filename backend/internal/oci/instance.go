@@ -426,7 +426,7 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 
 // ProbeIPPort tests TCP connection on port
 func ProbeIPPort(ip string, port int, timeout time.Duration) bool {
-	target := fmt.Sprintf("%s:%d", ip, port)
+	target := net.JoinHostPort(ip, fmt.Sprint(port))
 	conn, err := net.DialTimeout("tcp", target, timeout)
 	if err != nil {
 		return false

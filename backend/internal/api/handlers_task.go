@@ -66,6 +66,10 @@ func CreateTask(c *gin.Context) {
 
 	// 1. Single-Account Concurrency Lock check: only 1 profile can be operated at the same time
 	ok, lockedBy, err := cache.AcquireAccountLock(c.Request.Context(), profile.ID, 30*time.Second)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取账号并发锁失败 (Redis 不可用): " + err.Error()})
+		return
+	}
 	if !ok {
 		c.JSON(http.StatusConflict, gin.H{
 			"error": "【单账号并发锁限制】系统同一时间最多只允许并发操作一个 OCI 账号。当前正在执行账号 ID [" + lockedBy + "] 的操作，系统保护生效中，请稍候再试。",
