@@ -1,6 +1,6 @@
 <template>
-  <div class="mx-auto max-w-4xl">
-    <PageHeader title="设置" description="Telegram 通知、管理员密码与安全审计日志。" />
+  <div>
+    <PageHeader title="设置" description="Telegram 通知、管理员密码、IP 封禁与安全审计日志。" />
 
     <div class="space-y-4">
       <!-- Telegram -->
