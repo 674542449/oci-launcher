@@ -20,7 +20,6 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/limits"
 	"github.com/oracle/oci-go-sdk/v65/monitoring"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
-	"github.com/oracle/oci-go-sdk/v65/osubsubscription"
 )
 
 var (
@@ -221,20 +220,6 @@ func GetLimitsClient(profile *storage.OCIProfile) (limits.LimitsClient, error) {
 	return client, nil
 }
 
-func GetSubscriptionClient(profile *storage.OCIProfile) (osubsubscription.SubscriptionClient, error) {
-	provider, err := GetConfigurationProvider(profile)
-	if err != nil {
-		return osubsubscription.SubscriptionClient{}, err
-	}
-
-	client, err := osubsubscription.NewSubscriptionClientWithConfigurationProvider(provider)
-	if err != nil {
-		return osubsubscription.SubscriptionClient{}, err
-	}
-	client.HTTPClient = pooledHTTPClient
-
-	return client, nil
-}
 
 func GetObjectStorageClient(profile *storage.OCIProfile, regionOverride ...string) (objectstorage.ObjectStorageClient, error) {
 	provider, err := GetConfigurationProvider(profile)
