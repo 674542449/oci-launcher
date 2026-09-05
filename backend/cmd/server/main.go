@@ -34,8 +34,8 @@ func main() {
 		}
 		log.Printf("[WARN] MASTER_KEY 为默认值，仅允许在非生产环境使用")
 	}
-	log.Printf("[Init] Always Free 额度: A1 %.0f OCPU / %.0f GB, 存储 %d GB, Micro %d 台",
-		cfg.FreeA1OCPU, cfg.FreeA1MemoryGB, cfg.FreeStorageGB, cfg.FreeMicroCount)
+	log.Printf("[Init] A1 免费额度: 免费号 %.0f OCPU / %.0f GB, 升级号 %.0f OCPU / %.0f GB; 存储 %d GB, Micro %d 台",
+		cfg.FreeA1OCPU, cfg.FreeA1MemoryGB, cfg.PaygA1OCPU, cfg.PaygA1MemoryGB, cfg.FreeStorageGB, cfg.FreeMicroCount)
 
 	// 2. Initialize PostgreSQL
 	_, err := storage.InitDB(cfg.DBDSN)

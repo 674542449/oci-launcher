@@ -48,16 +48,37 @@ type QuotaSummary struct {
 	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
-// freeAllowance returns the configured Always Free allowances (see config.Config).
-func freeAllowance() (ocpu, memGB float64, storageGB int64, micro int) {
-	ocpu, memGB, storageGB, micro = 2, 12, 200, 2
+// a1Allowance returns the free A1 allowance for an account type:
+// Always Free tenancies get 2 OCPU / 12 GB, upgraded PAYG tenancies 4 OCPU / 24 GB (configurable).
+func a1Allowance(effectiveType string) (ocpu, memGB float64) {
+	ocpu, memGB = 2, 12
+	if effectiveType == "payg" {
+		ocpu, memGB = 4, 24
+	}
 	if cfg := config.GlobalConfig; cfg != nil {
-		if cfg.FreeA1OCPU > 0 {
-			ocpu = cfg.FreeA1OCPU
+		if effectiveType == "payg" {
+			if cfg.PaygA1OCPU > 0 {
+				ocpu = cfg.PaygA1OCPU
+			}
+			if cfg.PaygA1MemoryGB > 0 {
+				memGB = cfg.PaygA1MemoryGB
+			}
+		} else {
+			if cfg.FreeA1OCPU > 0 {
+				ocpu = cfg.FreeA1OCPU
+			}
+			if cfg.FreeA1MemoryGB > 0 {
+				memGB = cfg.FreeA1MemoryGB
+			}
 		}
-		if cfg.FreeA1MemoryGB > 0 {
-			memGB = cfg.FreeA1MemoryGB
-		}
+	}
+	return
+}
+
+// sharedAllowance returns the allowances that do not depend on the account type.
+func sharedAllowance() (storageGB int64, micro int) {
+	storageGB, micro = 200, 2
+	if cfg := config.GlobalConfig; cfg != nil {
 		if cfg.FreeStorageGB > 0 {
 			storageGB = cfg.FreeStorageGB
 		}
@@ -201,14 +222,12 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile, homeReg
 
 // GetLiveQuotaSummary gathers live usage in the home region (instances + boot/block volumes).
 func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*QuotaSummary, error) {
-	freeOCPU, freeMem, freeStorage, freeMicro := freeAllowance()
+	freeStorage, freeMicro := sharedAllowance()
 
 	summary := &QuotaSummary{
-		TotalFreeOCPU:     freeOCPU,
-		TotalFreeMemoryGB: freeMem,
-		TotalStorageGB:    freeStorage,
-		MaxMicroCount:     freeMicro,
-		UpdatedAt:         time.Now(),
+		TotalStorageGB: freeStorage,
+		MaxMicroCount:  freeMicro,
+		UpdatedAt:      time.Now(),
 	}
 
 	// 1. Home region (Always Free resources only exist there)
@@ -218,14 +237,17 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 	}
 	summary.HomeRegion = homeRegion
 
-	// 2. Account type from service limits
+	// 2. Account type from service limits (with manual override applied)
 	typeInfo, err := DetectAccountType(ctx, profile, homeRegion)
 	if err != nil {
 		return nil, err
 	}
 	summary.AccountType = *typeInfo
 
-	// A tenancy cap below the documented allowance wins; a higher cap never raises the free line.
+	// 3. A1 allowance depends on the effective account type: free 2/12, upgraded PAYG 4/24
+	summary.TotalFreeOCPU, summary.TotalFreeMemoryGB = a1Allowance(typeInfo.EffectiveType)
+
+	// A tenancy cap below the allowance wins; a higher cap never raises the free line.
 	if typeInfo.A1CoreLimit > 0 && float64(typeInfo.A1CoreLimit) < summary.TotalFreeOCPU {
 		summary.TotalFreeOCPU = float64(typeInfo.A1CoreLimit)
 	}

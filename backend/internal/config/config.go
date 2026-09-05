@@ -16,12 +16,14 @@ type Config struct {
 	AllowedIPs []string
 	DataDir    string
 
-	// Always Free allowances used by the zero-cost guard. Defaults follow
-	// https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm
-	// (A1.Flex: 1,500 OCPU-hours + 9,000 GB-hours per month = 2 OCPU / 12 GB continuously;
-	// 2 x E2.1.Micro; 200 GB block/boot storage). Override with FREE_* env vars if Oracle changes them.
+	// A1 allowances used by the zero-cost guard, chosen by the account's effective type:
+	//   - Always Free tenancy (FREE_*): 2 OCPU / 12 GB
+	//   - Upgraded PAYG tenancy (PAYG_*): 4 OCPU / 24 GB
+	// Storage (200 GB) and E2.1.Micro count (2) are the same for both.
 	FreeA1OCPU     float64
 	FreeA1MemoryGB float64
+	PaygA1OCPU     float64
+	PaygA1MemoryGB float64
 	FreeStorageGB  int64
 	FreeMicroCount int
 }
@@ -58,6 +60,8 @@ func LoadConfig() *Config {
 
 		FreeA1OCPU:     getEnvFloat("FREE_A1_OCPU", 2),
 		FreeA1MemoryGB: getEnvFloat("FREE_A1_MEMORY_GB", 12),
+		PaygA1OCPU:     getEnvFloat("PAYG_A1_OCPU", 4),
+		PaygA1MemoryGB: getEnvFloat("PAYG_A1_MEMORY_GB", 24),
 		FreeStorageGB:  int64(getEnvInt("FREE_STORAGE_GB", 200)),
 		FreeMicroCount: getEnvInt("FREE_MICRO_COUNT", 2),
 	}

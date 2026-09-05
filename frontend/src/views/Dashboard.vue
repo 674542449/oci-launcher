@@ -63,7 +63,7 @@
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
           <Meter
             label="ARM A1 算力"
-            hint="VM.Standard.A1.Flex · 免费共 4 OCPU"
+            :hint="`VM.Standard.A1.Flex · ${quota.account_type.effective_type === 'payg' ? '升级号' : '免费号'}免费 ${quota.total_free_ocpu} OCPU`"
             :value="quota.used_a1_ocpu"
             :max="quota.total_free_ocpu"
             unit="OCPU"

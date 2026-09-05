@@ -8,7 +8,7 @@
 
 ### 1. 100% 免费额度零成本硬隔离 (Always Free Guard)
 - **严格硬锁边界**：
-  - **ARM 架构 (VM.Standard.A1.Flex)**：按 Oracle 官方文档（每月 1,500 OCPU 小时 + 9,000 GB 小时）限制总配额 ≤ **2 OCPU / 12 GB**；租户限额更低时以限额为准。可通过 `FREE_A1_OCPU` / `FREE_A1_MEMORY_GB` 环境变量调整。
+  - **ARM 架构 (VM.Standard.A1.Flex)**：按账号类型区分免费额度——**免费号 ≤ 2 OCPU / 12 GB，升级号 (PAYG) ≤ 4 OCPU / 24 GB**；租户服务限额更低时以限额为准。账号类型由服务限额自动判定，也可在仪表盘手动覆盖；额度可通过 `FREE_A1_OCPU` / `FREE_A1_MEMORY_GB` / `PAYG_A1_OCPU` / `PAYG_A1_MEMORY_GB` 调整。
   - **AMD 架构 (VM.Standard.E2.1.Micro)**：严格限制总配额 ≤ 2 实例（各 1 OCPU / 1 GB 内存）。
   - **启动卷存储 (Boot Volumes)**：指定容量时 API 最小 50 GB，引导卷 + 块存储总容量严格限制 ≤ 200 GB（`FREE_STORAGE_GB`）。
   - **出站流量监控**：实时采集并监控 10 TB / 月免费出站流量指标（BytesOut），超限阈值自动告警。
@@ -125,9 +125,11 @@ ALLOWED_IPS=
 # 可选：信任其 X-Real-IP 头的反向代理网段，默认为 Docker 私有网段；后端直接暴露时填 none
 TRUSTED_PROXIES=
 
-# 可选：Always Free 额度（默认按 Oracle 2026-09 文档：A1 2 OCPU / 12 GB，存储 200 GB，Micro 2 台）
+# 可选：A1 免费额度（免费号 2 OCPU / 12 GB，升级号 4 OCPU / 24 GB），存储 200 GB，Micro 2 台
 FREE_A1_OCPU=2
 FREE_A1_MEMORY_GB=12
+PAYG_A1_OCPU=4
+PAYG_A1_MEMORY_GB=24
 FREE_STORAGE_GB=200
 FREE_MICRO_COUNT=2
 

@@ -64,11 +64,14 @@ func InitDB(dsn string) (*gorm.DB, error) {
 	return db, nil
 }
 
-// seedInitialPresets keeps the quick presets inside the configured Always Free allowance.
-// Presets are not user-editable, so stale seeds from older versions (4C/24G) are dropped and
-// the set is re-created whenever it is empty.
+// seedInitialPresets keeps the quick presets inside the configured A1 allowances:
+// free tenancies get 2 OCPU / 12 GB, upgraded PAYG tenancies 4 OCPU / 24 GB. Presets are not
+// user-editable, so anything above the PAYG allowance is dropped and the set is re-created
+// whenever it is empty. The zero-cost guard still rejects a PAYG preset on a free account.
 func seedInitialPresets(db *gorm.DB) {
-	freeOCPU, freeMem, freeStorage := 2.0, 12.0, int64(200)
+	freeOCPU, freeMem := 2.0, 12.0
+	paygOCPU, paygMem := 4.0, 24.0
+	freeStorage := int64(200)
 	if cfg := config.GlobalConfig; cfg != nil {
 		if cfg.FreeA1OCPU > 0 {
 			freeOCPU = cfg.FreeA1OCPU
@@ -76,13 +79,26 @@ func seedInitialPresets(db *gorm.DB) {
 		if cfg.FreeA1MemoryGB > 0 {
 			freeMem = cfg.FreeA1MemoryGB
 		}
+		if cfg.PaygA1OCPU > 0 {
+			paygOCPU = cfg.PaygA1OCPU
+		}
+		if cfg.PaygA1MemoryGB > 0 {
+			paygMem = cfg.PaygA1MemoryGB
+		}
 		if cfg.FreeStorageGB > 0 {
 			freeStorage = cfg.FreeStorageGB
 		}
 	}
+	maxOCPU, maxMem := freeOCPU, freeMem
+	if paygOCPU > maxOCPU {
+		maxOCPU = paygOCPU
+	}
+	if paygMem > maxMem {
+		maxMem = paygMem
+	}
 
-	// Remove presets that would fail the zero-cost guard
-	db.Where("shape LIKE ? AND (ocpu > ? OR memory_in_gbs > ?)", "%A1.Flex%", freeOCPU, freeMem).Delete(&Preset{})
+	// Remove presets no account type could ever launch for free
+	db.Where("shape LIKE ? AND (ocpu > ? OR memory_in_gbs > ?)", "%A1.Flex%", maxOCPU, maxMem).Delete(&Preset{})
 
 	var count int64
 	db.Model(&Preset{}).Count(&count)
@@ -90,33 +106,23 @@ func seedInitialPresets(db *gorm.DB) {
 		return
 	}
 
-	halfOCPU := freeOCPU / 2
-	halfMem := freeMem / 2
-	if halfOCPU < 1 {
-		halfOCPU, halfMem = freeOCPU, freeMem
+	a1 := func(name string, ocpu, mem float64, boot int64) Preset {
+		return Preset{
+			Name:                name,
+			Shape:               "VM.Standard.A1.Flex",
+			OCPU:                ocpu,
+			MemoryInGBs:         mem,
+			BootVolumeSizeInGBs: boot,
+			BootVolumeVPU:       120,
+			LoginMode:           "root_key",
+			EnableIPv6:          true,
+		}
 	}
 
 	presets := []Preset{
-		{
-			Name:                fmt.Sprintf("ARM 满额单机 (%.0fC / %.0fG / 100G)", freeOCPU, freeMem),
-			Shape:               "VM.Standard.A1.Flex",
-			OCPU:                freeOCPU,
-			MemoryInGBs:         freeMem,
-			BootVolumeSizeInGBs: 100,
-			BootVolumeVPU:       120,
-			LoginMode:           "root_key",
-			EnableIPv6:          true,
-		},
-		{
-			Name:                fmt.Sprintf("ARM 双机平分 (%.0fC / %.0fG / 50G)", halfOCPU, halfMem),
-			Shape:               "VM.Standard.A1.Flex",
-			OCPU:                halfOCPU,
-			MemoryInGBs:         halfMem,
-			BootVolumeSizeInGBs: 50,
-			BootVolumeVPU:       120,
-			LoginMode:           "root_key",
-			EnableIPv6:          true,
-		},
+		a1(fmt.Sprintf("升级号 ARM 满配 (%.0fC / %.0fG / 100G)", paygOCPU, paygMem), paygOCPU, paygMem, 100),
+		a1(fmt.Sprintf("免费号 ARM 满配 (%.0fC / %.0fG / 50G)", freeOCPU, freeMem), freeOCPU, freeMem, 50),
+		a1(fmt.Sprintf("ARM 小机 (%.0fC / %.0fG / 50G)", freeOCPU/2, freeMem/2), freeOCPU/2, freeMem/2, 50),
 		{
 			Name:                "AMD 微型机 (1C / 1G / 50G)",
 			Shape:               "VM.Standard.E2.1.Micro",
@@ -127,16 +133,10 @@ func seedInitialPresets(db *gorm.DB) {
 			LoginMode:           "root_key",
 			EnableIPv6:          true,
 		},
-		{
-			Name:                fmt.Sprintf("ARM 满额独享 (%.0fC / %.0fG / %dG 占满存储额度)", freeOCPU, freeMem, freeStorage),
-			Shape:               "VM.Standard.A1.Flex",
-			OCPU:                freeOCPU,
-			MemoryInGBs:         freeMem,
-			BootVolumeSizeInGBs: freeStorage,
-			BootVolumeVPU:       120,
-			LoginMode:           "root_key",
-			EnableIPv6:          true,
-		},
+		a1(fmt.Sprintf("升级号 ARM 满配独享 (%.0fC / %.0fG / %dG 占满存储额度)", paygOCPU, paygMem, freeStorage), paygOCPU, paygMem, freeStorage),
+	}
+	if freeOCPU/2 < 1 {
+		presets = append(presets[:2], presets[3:]...)
 	}
 	for _, p := range presets {
 		preset := p
