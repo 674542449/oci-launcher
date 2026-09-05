@@ -15,3 +15,6 @@ require (
 	gorm.io/driver/postgres v1.5.7
 	gorm.io/gorm v1.25.9
 )
+
+replace github.com/rogpeppe/go-internal => github.com/rogpeppe/go-internal v1.13.1
+
