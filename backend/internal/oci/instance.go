@@ -3,7 +3,6 @@ package oci
 import (
 	"context"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -347,7 +346,7 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 	vnicID := vnicList.Items[0].VnicId
 
 	// 2. Get Private IP OCID
-	vnicResp, err := netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: vnicID})
+	_, err = netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: vnicID})
 	if err != nil {
 		return "", fmt.Errorf("unable to get VNIC detail: %w", err)
 	}
