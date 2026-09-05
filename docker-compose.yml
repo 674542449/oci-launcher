@@ -1,0 +1,93 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: oci_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-oci_panel}
+      POSTGRES_USER: ${POSTGRES_USER:-oci_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-OciPanelSecPass998!}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - oci_internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-oci_admin} -d ${POSTGRES_DB:-oci_panel}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: oci_redis
+    restart: always
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-OciRedisPass998!}
+    volumes:
+      - redis_data:/data
+    networks:
+      - oci_internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-OciRedisPass998!}", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: oci_backend
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - APP_PORT=8080
+      - APP_ENV=production
+      - DB_DSN=postgres://${POSTGRES_USER:-oci_admin}:${POSTGRES_PASSWORD:-OciPanelSecPass998!}@postgres:5432/${POSTGRES_DB:-oci_panel}?sslmode=disable
+      - REDIS_ADDR=redis:6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-OciRedisPass998!}
+      - MASTER_KEY=${MASTER_KEY:-SuperMasterSecretKey32BytesLong!}
+      - ALLOWED_IPS=${ALLOWED_IPS:-}
+    volumes:
+      - ~/.oci:/root/.oci:ro
+      - app_data:/app/data
+    networks:
+      - oci_internal
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: oci_frontend
+    restart: always
+    depends_on:
+      - backend
+    ports:
+      - "127.0.0.1:8000:80"
+    networks:
+      - oci_internal
+
+  # Optional Cloudflare Tunnel container for 100% Zero Public Port Exposure
+  # cloudflared:
+  #   image: cloudflare/cloudflared:latest
+  #   container_name: oci_cloudflared
+  #   restart: always
+  #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+  #   depends_on:
+  #     - frontend
+  #   networks:
+  #     - oci_internal
+
+networks:
+  oci_internal:
+    driver: bridge
+
+volumes:
+  pg_data:
+  redis_data:
+  app_data:
