@@ -154,33 +154,24 @@ docker compose logs -f backend
 
 ---
 
-## 🛡️ Cloudflare Tunnel 物理隐身部署 (0 公网端口暴露)
+## 🛡️ Cloudflare Tunnel 零公网端口访问
 
-为了彻底避免服务器公网 IP 被全网扫描器发现，推荐将控制台仅监听于 `127.0.0.1`，通过 Cloudflare Tunnel 进行域名反代：
+控制台默认只监听 `127.0.0.1:8000`。推荐通过 Cloudflare Tunnel 用域名访问，服务器不需要开放任何公网端口，HTTPS 由 Cloudflare 提供。
 
-1. **登录 Cloudflare Zero Trust 控制台**：
-   - 导航至 **Networks** -> **Tunnels** -> 点击 **Create a Tunnel**。
-   - 选择 **Cloudflared**，给隧道命名（例如 `oci-console`）。
-2. **获取 Tunnel Token**：
-   - 复制页面中显示的 Token（即 `--token` 后面的字符串）。
-3. **启用 Tunnel 容器**：
-   - 将 Token 填入根目录 `.env` 的 `CLOUDFLARE_TUNNEL_TOKEN` 项：
-     ```ini
-     CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiYmMy...
-     ```
-   - 取消 `docker-compose.yml` 中 `cloudflared` 服务的注释（或新建 `docker-compose.override.yml` 添加该服务），然后启动：
-     ```bash
-     docker compose up -d
-     ```
-4. **配置公共主机名 (Public Hostname)**：
-   - 在 Cloudflare Tunnel 的 **Public Hostnames** 标签页中添加路由：
-     - **Subdomain**: `oci`
-     - **Domain**: `yourdomain.com`
-     - **Service Type**: `HTTP`
-     - **URL**: `frontend:80`
-5. **生效效果**：
-   - 服务器公网 IP 上 **无需开放 80、443 或 8080 端口**。
-   - 所有外部访问经由 Cloudflare CDN WAF 保护，直接以 `https://oci.yourdomain.com` 安全访问。
+1. **创建隧道并复制 Token**：Cloudflare Zero Trust（one.dash.cloudflare.com）→ **Networks → Tunnels → Create a tunnel → Cloudflared**，给隧道起名后，复制安装命令中 `eyJ` 开头的那一串 Token（不要在服务器上执行那条安装命令，隧道由容器运行）。
+2. **在服务器上一条命令启用**：
+   ```bash
+   cd /opt/oci-launcher && ./tunnel.sh eyJhIjoi...
+   ```
+   脚本会把 Token 写入 `.env`、启用 `tunnel` profile 并启动 `oci_cloudflared` 容器，随后打印连接日志。看到 `Registered tunnel connection` 即已连上。
+3. **配置公共主机名**：回到隧道页面 → **Configure → Public Hostname → Add a public hostname**：
+   - **Subdomain**：`oci`（可自定）
+   - **Domain**：你托管在 Cloudflare 的域名
+   - **Type**：`HTTP`
+   - **URL**：`frontend:80`（这是 Docker 内网里前端容器的地址，不要填服务器 IP）
+4. 访问 `https://oci.你的域名` 即可。之后执行更新命令（`git reset --hard origin/main` + `docker compose up -d --build`）不会影响隧道配置。
+
+停用隧道：`./tunnel.sh off`。建议再在 Zero Trust 的 **Access → Applications** 为该域名加一层邮箱验证码保护。
 
 ---
 

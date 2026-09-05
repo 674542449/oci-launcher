@@ -79,16 +79,22 @@ services:
     networks:
       - oci_internal
 
-  # Optional Cloudflare Tunnel container for 100% Zero Public Port Exposure
-  # cloudflared:
-  #   image: cloudflare/cloudflared:latest
-  #   container_name: oci_cloudflared
-  #   restart: always
-  #   command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
-  #   depends_on:
-  #     - frontend
-  #   networks:
-  #     - oci_internal
+  # Cloudflare Tunnel (optional, zero public ports). Not started unless the "tunnel" profile is on.
+  # Easiest: run  ./tunnel.sh <token>  — it writes CLOUDFLARE_TUNNEL_TOKEN and COMPOSE_PROFILES=tunnel
+  # into .env and starts this container. In Cloudflare, point the public hostname to  frontend:80 (HTTP).
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: oci_cloudflared
+    restart: always
+    profiles: ["tunnel"]
+    command: tunnel --no-autoupdate run
+    environment:
+      # Passed as an env var so the token never shows up in `docker ps` / process lists
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
+    depends_on:
+      - frontend
+    networks:
+      - oci_internal
 
 networks:
   oci_internal:

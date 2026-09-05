@@ -84,7 +84,10 @@ POSTGRES_PASSWORD=${DB_PASS}
 REDIS_PASSWORD=${REDIS_PASS}
 MASTER_KEY=${MASTER_KEY}
 ALLOWED_IPS=
+
+# Cloudflare Tunnel（可选）：执行 ./tunnel.sh <token> 会自动填写下面两项并启动隧道容器
 CLOUDFLARE_TUNNEL_TOKEN=
+COMPOSE_PROFILES=
 EOF
   chmod 600 .env
   echo -e "${GREEN}已自动生成高强随机密码并写入 .env (权限已锁定为 600)${NC}"
@@ -100,6 +103,6 @@ echo -e "${GREEN}===============================================================
 echo -e "🌐 本地访问地址: ${YELLOW}http://127.0.0.1:8000${NC}"
 echo -e "🔒 安全机制说明:"
 echo -e "  1. 系统默认仅监听 ${YELLOW}127.0.0.1:8000${NC} 本地回环，公网无法直接探测，杜绝全网扫描。"
-echo -e "  2. 推荐使用 Cloudflare Tunnel 映射域名访问（实现零公网端口暴露）。"
+echo -e "  2. 推荐使用 Cloudflare Tunnel 映射域名访问（零公网端口暴露）：${YELLOW}./tunnel.sh <隧道Token>${NC} 一条命令即可启用。"
 echo -e "  3. 首次访问请打开页面完成管理员账号与 2FA (TOTP) 身份验证器绑定！"
 echo -e "=====================================================================\n"
