@@ -88,9 +88,9 @@ func ListVCNs(ctx context.Context, profile *storage.OCIProfile, region string) (
 			continue
 		}
 		items = append(items, VCNItem{
-			OCID:        common.StringToEmptyString(vcn.Id),
-			DisplayName: common.StringToEmptyString(vcn.DisplayName),
-			CidrBlock:   common.StringToEmptyString(vcn.CidrBlock),
+			OCID:        StrVal(vcn.Id),
+			DisplayName: StrVal(vcn.DisplayName),
+			CidrBlock:   StrVal(vcn.CidrBlock),
 			State:       string(vcn.LifecycleState),
 		})
 	}
@@ -125,10 +125,10 @@ func ListSubnets(ctx context.Context, profile *storage.OCIProfile, region, vcnID
 			secListID = sub.SecurityListIds[0]
 		}
 		items = append(items, SubnetItem{
-			OCID:           common.StringToEmptyString(sub.Id),
-			DisplayName:    common.StringToEmptyString(sub.DisplayName),
-			VcnID:          common.StringToEmptyString(sub.VcnId),
-			CidrBlock:      common.StringToEmptyString(sub.CidrBlock),
+			OCID:           StrVal(sub.Id),
+			DisplayName:    StrVal(sub.DisplayName),
+			VcnID:          StrVal(sub.VcnId),
+			CidrBlock:      StrVal(sub.CidrBlock),
 			SecurityListID: secListID,
 			State:          string(sub.LifecycleState),
 		})
@@ -295,7 +295,7 @@ func ListSecurityRules(ctx context.Context, profile *storage.OCIProfile, region,
 			}
 		}
 
-		proto := common.StringToEmptyString(rule.Protocol)
+		proto := StrVal(rule.Protocol)
 		if proto == "6" {
 			proto = "TCP"
 		} else if proto == "17" {
@@ -306,8 +306,8 @@ func ListSecurityRules(ctx context.Context, profile *storage.OCIProfile, region,
 
 		items = append(items, SecurityRuleItem{
 			Protocol:    proto,
-			Source:      common.StringToEmptyString(rule.Source),
-			Description: common.StringToEmptyString(rule.Description),
+			Source:      StrVal(rule.Source),
+			Description: StrVal(rule.Description),
 			PortRange:   portStr,
 		})
 	}
