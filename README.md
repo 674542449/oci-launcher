@@ -79,19 +79,22 @@ oci/
 
 ## 🚀 部署指南
 
-### 方法一：Debian / Ubuntu 一键脚本极速部署 (推荐)
+### 方法一：Debian / Ubuntu 一键极速部署 (推荐，一行命令全自动)
 
-一键脚本将自动完成系统依赖检查、Docker 及 Compose 插件安装、生成 32 位高熵随机密码、初始化 `.env` 配置文件并拉起容器集群：
+直接在目标服务器终端（以 root 权限）执行以下单行命令，将自动完成系统依赖检查、Docker 及 Compose 插件安装、源码拉取、生成高熵随机密码、配置 `.env` 并拉起容器集群：
 
 ```bash
-# 1. 下载或克隆仓库到服务器
-git clone <your-repo-url> /opt/oci-launcher
+# 方式 A：纯单行指令一键全自动安装 (推荐)
+curl -fsSL https://raw.githubusercontent.com/674542449/oci-launcher/main/deploy.sh | sudo bash
+```
+
+或者通过 Git 克隆部署：
+
+```bash
+# 方式 B：手动克隆仓库部署
+git clone https://github.com/674542449/oci-launcher.git /opt/oci-launcher
 cd /opt/oci-launcher
-
-# 2. 赋予脚本执行权限
 chmod +x deploy.sh
-
-# 3. 运行自动化部署
 ./deploy.sh
 ```
 
