@@ -1,189 +1,184 @@
 <template>
-  <div class="space-y-6">
-    <!-- Header with Refresh Button -->
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
-      <div class="space-y-1">
-        <div class="flex items-center space-x-3">
-          <h2 class="text-xl font-bold text-gray-900">{{ currentProfile?.name || '未选择账号' }}</h2>
-          <!-- Account Type Badge -->
-          <span
-            v-if="quota?.account_type"
-            class="px-2.5 py-0.5 rounded-full text-xs font-semibold"
-            :class="quota.account_type.effective_type === 'payg' ? 'bg-green-50 text-green-700 border border-green-200' : 'bg-blue-50 text-blue-700 border border-blue-200'"
-          >
-            {{ quota.account_type.effective_type === 'payg' ? '🟢 已升级按量付费号 (PAYG)' : '🔵 未升级免费号 (Always Free)' }}
-          </span>
-          <span v-if="currentProfile?.status === 'Active'" class="text-xs px-2 py-0.5 bg-emerald-50 text-emerald-600 rounded border border-emerald-200 font-medium">
-            活跃正常
-          </span>
-          <span v-else-if="currentProfile?.status === 'Banned'" class="text-xs px-2 py-0.5 bg-red-50 text-red-600 rounded border border-red-200 font-bold animate-pulse">
-            疑似封号/已停用
-          </span>
-        </div>
-        <p class="text-xs text-gray-500">
-          主区域 (Home Region): <span class="font-mono font-medium text-gray-700">{{ quota?.home_region || currentProfile?.region || '探测中' }}</span> ·
-          租户 OCID: <span class="font-mono text-gray-400">{{ maskOCID(currentProfile?.tenancy_ocid) }}</span>
-        </p>
-      </div>
+  <div>
+    <PageHeader eyebrow="额度仪表盘" :title="currentProfile?.name || '尚未选择账号'">
+      <template #actions>
+        <n-button secondary :loading="loading" :disabled="!currentProfile" @click="fetchData">
+          <template #icon><n-icon><RefreshOutline /></n-icon></template>
+          刷新配额
+        </n-button>
+        <n-button type="primary" :disabled="!currentProfile" @click="$router.push('/launcher')">
+          <template #icon><n-icon><RocketOutline /></n-icon></template>
+          去抢机
+        </n-button>
+      </template>
+    </PageHeader>
 
-      <!-- Action Buttons -->
-      <div class="flex items-center space-x-3">
-        <n-button :loading="loading" type="primary" secondary @click="fetchData">
-          🔄 手动刷新配额
-        </n-button>
-        <n-button type="primary" @click="$router.push('/launcher')">
-          🚀 去抢机
-        </n-button>
-      </div>
+    <!-- No accounts yet -->
+    <div v-if="!profileStore.loading && profileStore.profiles.length === 0" class="card">
+      <EmptyState title="还没有导入任何 OCI 账号" description="先导入一个账号的 API 凭据，仪表盘会实时读取它的免费额度使用情况。">
+        <n-button type="primary" @click="$router.push('/profiles')">导入账号</n-button>
+      </EmptyState>
     </div>
 
-    <!-- Transparent Account Type Proof & Manual Override Card -->
-    <div v-if="quota" class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-gray-100 pb-3">
-        <div>
-          <h3 class="text-sm font-bold text-gray-900">账号类型官方依据与判定透明公示</h3>
-          <p class="text-xs text-gray-500">拒绝黑箱，所有免费额度判定均基于 Oracle 官方底层 API 与配额数据验证</p>
+    <template v-else>
+      <!-- Identity strip -->
+      <div class="card card-pad mb-6">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div class="flex flex-wrap items-center gap-2">
+            <StatusPill :state="currentProfile?.status || 'UNKNOWN'" :label="profileStatusLabel" />
+            <span v-if="quota" class="pill" :class="quota.account_type.effective_type === 'payg' ? 'pill-info' : 'pill-muted'">
+              {{ quota.account_type.effective_type === 'payg' ? '按量付费 PAYG' : 'Always Free' }}
+            </span>
+            <span class="caption">
+              主区域 <span class="mono text-ink-2">{{ quota?.home_region || currentProfile?.region || '—' }}</span>
+              <span class="mx-1.5 text-line-strong">·</span>
+              租户 <span class="mono text-ink-2" :title="currentProfile?.tenancy_ocid">{{ maskOCID(currentProfile?.tenancy_ocid) }}</span>
+            </span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-ink-3">账号类型覆盖</span>
+            <n-select
+              v-model:value="overrideValue"
+              :options="overrideOptions"
+              size="small"
+              class="w-44"
+              :disabled="!currentProfile"
+              @update:value="saveOverride"
+            />
+          </div>
         </div>
-        <!-- Manual Override Switcher -->
-        <div class="flex items-center space-x-2">
-          <span class="text-xs text-gray-600 font-medium">人工覆盖开关:</span>
-          <n-select
-            v-model:value="overrideValue"
-            :options="overrideOptions"
-            size="small"
-            class="w-36"
-            @update:value="saveOverride"
+      </div>
+
+      <!-- Loading skeleton -->
+      <div v-if="loading && !quota" class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div v-for="i in 4" :key="i" class="card card-pad space-y-4">
+          <n-skeleton text :repeat="1" width="40%" />
+          <n-skeleton height="10px" :sharp="false" />
+          <n-skeleton text :repeat="1" width="70%" />
+        </div>
+      </div>
+
+      <template v-else-if="quota">
+        <!-- Free-tier allotment meters: each cell is one unit of the allotment -->
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          <Meter
+            label="ARM A1 算力"
+            hint="VM.Standard.A1.Flex · 免费共 4 OCPU"
+            :value="quota.used_a1_ocpu"
+            :max="quota.total_free_ocpu"
+            unit="OCPU"
+            :segments="quota.total_free_ocpu || 4"
           />
-        </div>
-      </div>
-
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-4 text-xs">
-        <div class="bg-gray-50 p-3.5 rounded-xl border border-gray-100 space-y-1">
-          <span class="text-gray-500 font-medium">官方 API 判定结果</span>
-          <div class="text-sm font-bold text-gray-800">{{ quota.account_type.detected_type }}</div>
-          <p class="text-gray-400 text-[11px]">OneSubscription 官方订阅模型</p>
-        </div>
-        <div class="bg-gray-50 p-3.5 rounded-xl border border-gray-100 space-y-1">
-          <span class="text-gray-500 font-medium">底层 A1 核心限额探测</span>
-          <div class="text-sm font-bold text-gray-800">{{ quota.account_type.a1_core_limit || '未知' }} OCPU</div>
-          <p class="text-gray-400 text-[11px]">standard-a1-core-count</p>
-        </div>
-        <div class="bg-gray-50 p-3.5 rounded-xl border border-gray-100 space-y-1 md:col-span-1">
-          <span class="text-gray-500 font-medium">当前生效免费额度</span>
-          <div class="text-sm font-bold text-red-600">{{ quota.total_free_ocpu }} OCPU / {{ quota.total_free_memory_gb }} GB</div>
-          <p class="text-gray-400 text-[11px]">{{ quota.account_type.effective_type === 'payg' ? 'PAYG 升级号 (享 4C/24G 免费额度)' : 'Always Free 免费号 (享 4C/24G 免费额度)' }}</p>
-        </div>
-      </div>
-
-      <!-- Detection Reason Banner -->
-      <div class="bg-blue-50 border border-blue-100 p-3 rounded-xl flex items-center text-xs text-blue-900 space-x-2">
-        <span>📋</span>
-        <span><b>判定依据:</b> {{ quota.account_type.detection_reason }}</span>
-      </div>
-    </div>
-
-    <!-- Resource Quotas Progress Dashboard -->
-    <div v-if="quota" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-      <!-- 1. ARM A1 OCPU -->
-      <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-        <div class="flex justify-between items-center">
-          <span class="text-sm font-bold text-gray-700">ARM A1 算力核心</span>
-          <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">{{ quota.used_a1_ocpu }} / {{ quota.total_free_ocpu }} OCPU</span>
-        </div>
-        <n-progress
-          type="line"
-          :percentage="Math.min(100, Math.round((quota.used_a1_ocpu / quota.total_free_ocpu) * 100))"
-          :color="quota.used_a1_ocpu > quota.total_free_ocpu ? '#DC2626' : '#C74634'"
-          :height="10"
-          border-radius="5px"
-        />
-        <div class="flex justify-between text-xs text-gray-500">
-          <span>已用: <b>{{ quota.used_a1_ocpu }}</b> 核</span>
-          <span>剩余可开: <b class="text-emerald-600">{{ quota.available_a1_ocpu }}</b> 核</span>
-        </div>
-      </div>
-
-      <!-- 2. ARM A1 Memory -->
-      <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-        <div class="flex justify-between items-center">
-          <span class="text-sm font-bold text-gray-700">ARM A1 内存容量</span>
-          <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">{{ quota.used_a1_memory_gb }} / {{ quota.total_free_memory_gb }} GB</span>
-        </div>
-        <n-progress
-          type="line"
-          :percentage="Math.min(100, Math.round((quota.used_a1_memory_gb / quota.total_free_memory_gb) * 100))"
-          :color="quota.used_a1_memory_gb > quota.total_free_memory_gb ? '#DC2626' : '#C74634'"
-          :height="10"
-          border-radius="5px"
-        />
-        <div class="flex justify-between text-xs text-gray-500">
-          <span>已用: <b>{{ quota.used_a1_memory_gb }}</b> GB</span>
-          <span>剩余可配: <b class="text-emerald-600">{{ quota.available_a1_memory_gb }}</b> GB</span>
-        </div>
-      </div>
-
-      <!-- 3. Boot & Block Storage (200GB Limit) -->
-      <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-        <div class="flex justify-between items-center">
-          <span class="text-sm font-bold text-gray-700">总块存储与引导卷</span>
-          <span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600 font-mono">{{ quota.used_storage_gb }} / 200 GB</span>
-        </div>
-        <n-progress
-          type="line"
-          :percentage="Math.min(100, Math.round((quota.used_storage_gb / 200) * 100))"
-          color="#0284C7"
-          :height="10"
-          border-radius="5px"
-        />
-        <div class="flex justify-between text-xs text-gray-500">
-          <span>已占: <b>{{ quota.used_storage_gb }}</b> GB</span>
-          <span>剩余免费: <b class="text-emerald-600">{{ quota.available_storage_gb }}</b> GB</span>
-        </div>
-      </div>
-
-      <!-- 4. Monthly Outbound Traffic (10TB Free) -->
-      <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-        <div class="flex justify-between items-center">
-          <span class="text-sm font-bold text-gray-700">当月出站流量</span>
-          <span
-            class="text-xs px-2 py-0.5 rounded font-mono font-bold"
-            :class="trafficInfo?.alert_level === 'critical' ? 'bg-red-100 text-red-700' : (trafficInfo?.alert_level === 'warning' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600')"
+          <Meter
+            label="ARM A1 内存"
+            hint="每 OCPU 建议搭配 6 GB"
+            :value="quota.used_a1_memory_gb"
+            :max="quota.total_free_memory_gb"
+            unit="GB"
+            :segments="quota.total_free_memory_gb || 24"
+            :group-size="6"
+          />
+          <Meter
+            label="块存储与引导卷"
+            hint="引导卷 + 块存储合计 200 GB"
+            :value="quota.used_storage_gb"
+            :max="quota.total_storage_gb || 200"
+            unit="GB"
+            :segments="8"
+            :group-size="2"
+          />
+          <Meter
+            label="当月出站流量"
+            :hint="trafficInfo?.alert_description || '每月免费 10 TB'"
+            :value="trafficInfo?.used_tb || 0"
+            :max="trafficInfo?.max_tb || 10"
+            unit="TB"
+            :segments="10"
+            :decimals="2"
+            :warn-at="0.8"
           >
-            {{ trafficInfo?.used_tb?.toFixed(2) || '0.00' }} / 10 TB
-          </span>
+            <template #left>
+              <span>消耗 <b class="mono font-semibold text-ink-2">{{ (trafficInfo?.used_percent || 0).toFixed(1) }}%</b></span>
+            </template>
+          </Meter>
         </div>
-        <n-progress
-          type="line"
-          :percentage="Math.min(100, Math.round(trafficInfo?.used_percent || 0))"
-          :color="trafficInfo?.alert_level === 'critical' ? '#DC2626' : (trafficInfo?.alert_level === 'warning' ? '#F59E0B' : '#10B981')"
-          :height="10"
-          border-radius="5px"
-        />
-        <div class="flex justify-between text-xs text-gray-500">
-          <span>消耗率: <b>{{ trafficInfo?.used_percent?.toFixed(1) || 0 }}%</b></span>
-          <span>免费上限: <b>10 TB/月</b></span>
-        </div>
-      </div>
-    </div>
 
-    <!-- Estimated Fee Alert if Over Soft Line -->
-    <div v-if="quota?.estimated_monthly_fee > 0" class="p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-center space-x-3 text-sm text-amber-800">
-      <span class="text-2xl">⚠️</span>
-      <div>
-        <p class="font-bold">注意: 您的当前实例配置已超过免费软上限，产生按量计费预估！</p>
-        <p class="text-xs text-amber-700">
-          预估超出部分月费约为: <b>${{ quota.estimated_monthly_fee.toFixed(2) }}/月</b> ($0.01/核时 + $0.0015/GB时)。建议在「实例管理」中降配到免费水位。
-        </p>
+        <div class="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <!-- Micro slots -->
+          <Meter
+            label="AMD Micro 实例"
+            hint="VM.Standard.E2.1.Micro · 免费 2 台"
+            :value="quota.micro_count"
+            :max="quota.max_micro_count || 2"
+            unit="台"
+            :segments="quota.max_micro_count || 2"
+            :warn-at="1.01"
+          />
+
+          <!-- How the account type was decided -->
+          <div class="card card-pad lg:col-span-2">
+            <div class="card-head mb-4">
+              <div>
+                <div class="section-title">账号类型判定依据</div>
+                <p class="caption">基于 Oracle 官方 API 与配额数据，可在上方手动覆盖。</p>
+              </div>
+            </div>
+            <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-3">
+              <div class="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
+                <dt class="caption">API 判定结果</dt>
+                <dd class="mono mt-0.5 text-[15px] font-semibold text-ink">{{ quota.account_type.detected_type || 'UNKNOWN' }}</dd>
+                <dd class="caption mt-0.5">OneSubscription 订阅模型</dd>
+              </div>
+              <div class="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
+                <dt class="caption">A1 核心限额</dt>
+                <dd class="mono mt-0.5 text-[15px] font-semibold text-ink">{{ quota.account_type.a1_core_limit || '—' }} <span class="text-xs font-normal text-ink-3">OCPU</span></dd>
+                <dd class="caption mt-0.5 mono">standard-a1-core-count</dd>
+              </div>
+              <div class="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
+                <dt class="caption">当前生效免费额度</dt>
+                <dd class="mono mt-0.5 text-[15px] font-semibold text-ink">{{ quota.total_free_ocpu }} OCPU <span class="text-ink-3">/</span> {{ quota.total_free_memory_gb }} GB</dd>
+                <dd class="caption mt-0.5">{{ quota.account_type.effective_type === 'payg' ? 'PAYG 升级号' : 'Always Free 免费号' }}</dd>
+              </div>
+            </dl>
+            <div v-if="quota.account_type.detection_reason" class="notice notice-info mt-4">
+              <n-icon size="18" class="mt-0.5 shrink-0"><InformationCircleOutline /></n-icon>
+              <span>{{ quota.account_type.detection_reason }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Over the free line -->
+        <div v-if="quota.estimated_monthly_fee > 0" class="notice notice-warn mt-4">
+          <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
+          <div>
+            <p class="font-semibold">当前配置已超过免费上限，会产生按量计费。</p>
+            <p class="mt-0.5">
+              预估超出部分约 <b class="mono">${{ quota.estimated_monthly_fee.toFixed(2) }}</b> / 月（$0.01 每核时 + $0.0015 每 GB 时）。可在「实例」页面降配回免费水位。
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <!-- Failed to load -->
+      <div v-else-if="!loading && currentProfile" class="card">
+        <EmptyState title="暂时读不到这个账号的配额" description="请检查账号凭据是否有效，或稍后重试。">
+          <n-button secondary @click="fetchData">重试</n-button>
+        </EmptyState>
       </div>
-    </div>
+    </template>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
+import { NButton, NIcon, NSelect, NSkeleton, useMessage } from 'naive-ui'
+import { RefreshOutline, RocketOutline, InformationCircleOutline, WarningOutline } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
-import { useMessage } from 'naive-ui'
+import PageHeader from '@/components/PageHeader.vue'
+import Meter from '@/components/Meter.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import EmptyState from '@/components/EmptyState.vue'
 
 const profileStore = useProfileStore()
 const message = useMessage()
@@ -194,18 +189,24 @@ const trafficInfo = ref<any>(null)
 const overrideValue = ref('auto')
 
 const overrideOptions = [
-  { label: '智能自动判定 (Auto)', value: 'auto' },
+  { label: '自动判定', value: 'auto' },
   { label: '强制 Always Free', value: 'free' },
-  { label: '强制 PAYG (已升级)', value: 'payg' },
+  { label: '强制 PAYG', value: 'payg' },
 ]
 
-const currentProfile = computed(() => {
-  return profileStore.profiles.find(p => p.id === profileStore.activeProfileId)
+const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
+
+const profileStatusLabel = computed(() => {
+  const s = currentProfile.value?.status
+  if (s === 'Active') return '账号正常'
+  if (s === 'Banned') return '疑似封号 / 已停用'
+  if (s === 'Invalid') return '凭据无效'
+  return s || '状态未知'
 })
 
 const maskOCID = (ocid?: string) => {
-  if (!ocid || ocid.length < 20) return ocid || '未知'
-  return ocid.substring(0, 12) + '...' + ocid.substring(ocid.length - 8)
+  if (!ocid || ocid.length < 20) return ocid || '—'
+  return ocid.substring(0, 12) + '…' + ocid.substring(ocid.length - 8)
 }
 
 const fetchData = async () => {
@@ -215,11 +216,15 @@ const fetchData = async () => {
     const res: any = await api.get(`/quota?profile_id=${profileStore.activeProfileId}`)
     quota.value = res.summary
     overrideValue.value = currentProfile.value?.account_type_override || 'auto'
-
-    // Fetch traffic
-    const trafRes: any = await api.get(`/quota/traffic?profile_id=${profileStore.activeProfileId}`)
-    trafficInfo.value = trafRes.traffic
+    try {
+      const trafRes: any = await api.get(`/quota/traffic?profile_id=${profileStore.activeProfileId}`)
+      trafficInfo.value = trafRes.traffic
+    } catch (e: any) {
+      trafficInfo.value = null
+      message.warning('流量数据暂时不可用：' + e.message)
+    }
   } catch (e: any) {
+    quota.value = null
     message.error(e.message)
   } finally {
     loading.value = false
@@ -235,16 +240,22 @@ const saveOverride = async (val: string) => {
       tags: currentProfile.value.tags,
       notes: currentProfile.value.notes,
     })
-    message.success('人工覆盖配置已持久化保存！')
+    message.success('账号类型覆盖已保存')
+    await profileStore.fetchProfiles()
     await fetchData()
   } catch (e: any) {
     message.error(e.message)
   }
 }
 
-watch(() => profileStore.activeProfileId, () => {
-  fetchData()
-})
+watch(
+  () => profileStore.activeProfileId,
+  () => {
+    quota.value = null
+    trafficInfo.value = null
+    fetchData()
+  },
+)
 
 onMounted(() => {
   fetchData()

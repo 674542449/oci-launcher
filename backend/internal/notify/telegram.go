@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
+	"io"
+	"log"
 	"net/http"
 	"time"
 
@@ -13,13 +16,18 @@ import (
 type TelegramMessage struct {
 	ChatID    string `json:"chat_id"`
 	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode"` // HTML or MarkdownV2
+	ParseMode string `json:"parse_mode"` // HTML
 }
 
-// SendTelegramMessage sends a message to Telegram Bot
+// esc escapes user-controlled text for Telegram's HTML parse mode (<, >, & must be entities).
+func esc(s string) string {
+	return html.EscapeString(s)
+}
+
+// SendTelegramMessage sends an HTML message through the Bot API
 func SendTelegramMessage(botToken, chatID, messageText string) error {
 	if botToken == "" || chatID == "" {
-		return nil
+		return fmt.Errorf("telegram bot token or chat id not configured")
 	}
 
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", botToken)
@@ -34,7 +42,7 @@ func SendTelegramMessage(botToken, chatID, messageText string) error {
 		return err
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Post(url, "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return err
@@ -42,13 +50,21 @@ func SendTelegramMessage(botToken, chatID, messageText string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		var apiErr struct {
+			Description string `json:"description"`
+		}
+		_ = json.Unmarshal(body, &apiErr)
+		if apiErr.Description != "" {
+			return fmt.Errorf("telegram API error %d: %s", resp.StatusCode, apiErr.Description)
+		}
 		return fmt.Errorf("telegram API returned status: %d", resp.StatusCode)
 	}
 
 	return nil
 }
 
-// GetGlobalTelegramConfig retrieves global bot token and chat id from settings
+// GetGlobalTelegramConfig retrieves the bot token and chat id from settings
 func GetGlobalTelegramConfig() (botToken string, chatID string) {
 	var tokenSetting, chatSetting storage.SystemSetting
 	if err := storage.DB.First(&tokenSetting, "key = ?", "tg_bot_token").Error; err == nil {
@@ -60,53 +76,57 @@ func GetGlobalTelegramConfig() (botToken string, chatID string) {
 	return botToken, chatID
 }
 
-// NotifyTaskSuccess sends rich success notification
-func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, publicIP, ipv6, rootPass string) {
+func sendOrLog(kind, text string) {
 	botToken, chatID := GetGlobalTelegramConfig()
 	if botToken == "" || chatID == "" {
 		return
 	}
-
-	sshCmd := fmt.Sprintf("ssh root@%s", publicIP)
-
-	text := fmt.Sprintf(`🎉 <b>【OCI 免费实例抢机成功通知】</b>
-
-👤 <b>账号别名:</b> %s
-🏢 <b>租户区域:</b> %s
-🖥️ <b>实例名称:</b> %s
-⚙️ <b>硬件规格:</b> %s (%0.1f OCPU / %0.1f GB 内存 / %d GB 引导卷)
-🌐 <b>公网 IPv4:</b> <code>%s</code>
-`, profile.Name, task.Region, task.InstanceName, task.Shape, task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, publicIP)
-
-	if ipv6 != "" {
-		text += fmt.Sprintf("🌐 <b>公网 IPv6:</b> <code>%s</code>\n", ipv6)
+	if err := SendTelegramMessage(botToken, chatID, text); err != nil {
+		log.Printf("[Notify] Telegram %s notification failed: %v", kind, err)
 	}
-
-	if task.LoginMode == "root_password" && rootPass != "" {
-		text += fmt.Sprintf("🔑 <b>Root 安全密码:</b> <code>%s</code> <i>(已自动持久化保存在实例云端标签)</i>\n", rootPass)
-	}
-
-	text += fmt.Sprintf("\n💻 <b>一键登录命令:</b>\n<code>%s</code>\n\n✅ <i>开机任务已自动停止。</i>", sshCmd)
-
-	_ = SendTelegramMessage(botToken, chatID, text)
 }
 
-// NotifyTaskFatalError sends fatal error alert
-func NotifyTaskFatalError(task *storage.LaunchTask, profile *storage.OCIProfile, errMsg string) {
-	botToken, chatID := GetGlobalTelegramConfig()
-	if botToken == "" || chatID == "" {
-		return
+// NotifyTaskSuccess sends the launch success notification
+func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, publicIP, ipv6, rootPass string) {
+	ipText := publicIP
+	if ipText == "" {
+		ipText = "尚未分配，请稍后在实例页刷新"
 	}
 
-	text := fmt.Sprintf(`⚠️ <b>【OCI 抢机任务异常熔断告警】</b>
+	text := fmt.Sprintf(`🎉 <b>OCI 抢机成功</b>
 
-👤 <b>账号别名:</b> %s
-🖥️ <b>实例名称:</b> %s
-🛑 <b>任务状态:</b> 立即停止 (Fatal Error)
-❌ <b>错误详情:</b>
+👤 <b>账号:</b> %s
+🏢 <b>区域:</b> %s
+🖥️ <b>实例:</b> %s
+⚙️ <b>规格:</b> %s (%0.1f OCPU / %0.1f GB / %d GB 引导卷)
+🌐 <b>公网 IPv4:</b> <code>%s</code>
+`, esc(profile.Name), esc(task.Region), esc(task.InstanceName), esc(task.Shape), task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, esc(ipText))
+
+	if ipv6 != "" {
+		text += fmt.Sprintf("🌐 <b>IPv6:</b> <code>%s</code>\n", esc(ipv6))
+	}
+	if task.LoginMode == "root_password" && rootPass != "" {
+		text += fmt.Sprintf("🔑 <b>Root 密码:</b> <code>%s</code> <i>(同时保存在实例云端标签中)</i>\n", esc(rootPass))
+	}
+	if publicIP != "" {
+		text += fmt.Sprintf("\n💻 <b>登录:</b> <code>ssh root@%s</code>\n", esc(publicIP))
+	}
+	text += "\n✅ <i>抢机任务已自动停止。</i>"
+
+	sendOrLog("success", text)
+}
+
+// NotifyTaskFatalError sends the fatal error alert
+func NotifyTaskFatalError(task *storage.LaunchTask, profile *storage.OCIProfile, errMsg string) {
+	text := fmt.Sprintf(`⚠️ <b>OCI 抢机任务已熔断</b>
+
+👤 <b>账号:</b> %s
+🖥️ <b>实例:</b> %s
+🛑 <b>状态:</b> 已停止（配置或凭据错误，不再重试）
+❌ <b>原因:</b>
 <code>%s</code>
 
-💡 <i>提示: 该错误属于非容量类配置/权限错误，系统已实施自动熔断，避免带病无效空转。</i>`, profile.Name, task.InstanceName, errMsg)
+💡 <i>请修正配置或凭据后在面板中重新启动任务。</i>`, esc(profile.Name), esc(task.InstanceName), esc(errMsg))
 
-	_ = SendTelegramMessage(botToken, chatID, text)
+	sendOrLog("fatal", text)
 }

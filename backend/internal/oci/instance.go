@@ -32,13 +32,52 @@ type InstanceItem struct {
 	SSHCommand   string            `json:"ssh_command"`
 }
 
-// ListInstancesWithDetails retrieves instances with VNIC details (Public IP, IPv6, Tags)
+// primaryVnic returns the instance's primary VNIC (the one that carries the public IP).
+// Only ATTACHED attachments are considered; the primary VNIC is preferred over secondaries.
+func primaryVnic(ctx context.Context, computeClient core.ComputeClient, netClient core.VirtualNetworkClient, tenancyOCID, instanceOCID string) (core.Vnic, error) {
+	req := core.ListVnicAttachmentsRequest{
+		CompartmentId: common.String(tenancyOCID),
+		InstanceId:    common.String(instanceOCID),
+	}
+	var fallback *core.Vnic
+	for {
+		resp, err := computeClient.ListVnicAttachments(ctx, req)
+		if err != nil {
+			return core.Vnic{}, err
+		}
+		for _, va := range resp.Items {
+			if va.LifecycleState != core.VnicAttachmentLifecycleStateAttached || va.VnicId == nil {
+				continue
+			}
+			vnicResp, err := netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: va.VnicId})
+			if err != nil {
+				continue
+			}
+			if BoolVal(vnicResp.Vnic.IsPrimary) {
+				return vnicResp.Vnic, nil
+			}
+			if fallback == nil {
+				v := vnicResp.Vnic
+				fallback = &v
+			}
+		}
+		if resp.OpcNextPage == nil {
+			break
+		}
+		req.Page = resp.OpcNextPage
+	}
+	if fallback != nil {
+		return *fallback, nil
+	}
+	return core.Vnic{}, fmt.Errorf("no attached VNIC found for instance %s", instanceOCID)
+}
+
+// ListInstancesWithDetails retrieves instances (all pages) with primary VNIC details and the root password tag
 func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, region string) ([]InstanceItem, error) {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
-
 	netClient, err := GetVirtualNetworkClient(profile, region)
 	if err != nil {
 		return nil, err
@@ -48,15 +87,24 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 		CompartmentId: common.String(profile.TenancyOCID),
 		SortBy:        core.ListInstancesSortByTimecreated,
 		SortOrder:     core.ListInstancesSortOrderDesc,
+		Limit:         common.Int(100),
 	}
 
-	resp, err := computeClient.ListInstances(ctx, req)
-	if err != nil {
-		return nil, err
+	var instances []core.Instance
+	for {
+		resp, err := computeClient.ListInstances(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, resp.Items...)
+		if resp.OpcNextPage == nil {
+			break
+		}
+		req.Page = resp.OpcNextPage
 	}
 
-	var items []InstanceItem
-	for _, inst := range resp.Items {
+	items := make([]InstanceItem, 0, len(instances))
+	for _, inst := range instances {
 		if inst.LifecycleState == core.InstanceLifecycleStateTerminated {
 			continue
 		}
@@ -70,7 +118,6 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 			Region:       region,
 			FreeformTags: inst.FreeformTags,
 		}
-
 		if inst.ShapeConfig != nil {
 			if inst.ShapeConfig.Ocpus != nil {
 				item.OCPU = *inst.ShapeConfig.Ocpus
@@ -79,36 +126,22 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 				item.MemoryInGBs = *inst.ShapeConfig.MemoryInGBs
 			}
 		}
-
 		if inst.TimeCreated != nil {
-			item.TimeCreated = inst.TimeCreated.Format("2006-01-02 15:04:05")
+			item.TimeCreated = inst.TimeCreated.Format(time.RFC3339)
 		}
-
-		// Read root password from freeform tags if present
 		if inst.FreeformTags != nil {
 			if pass, ok := inst.FreeformTags["root_password"]; ok {
 				item.RootPassword = pass
 			}
 		}
 
-		// Query VNIC for IP addresses
-		vnicReq := core.ListVnicAttachmentsRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-			InstanceId:    inst.Id,
-		}
-		vnicResp, err2 := computeClient.ListVnicAttachments(ctx, vnicReq)
-		if err2 == nil && len(vnicResp.Items) > 0 {
-			for _, va := range vnicResp.Items {
-				if va.LifecycleState == core.VnicAttachmentLifecycleStateAttached && va.VnicId != nil {
-					vnicDetail, err3 := netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: va.VnicId})
-					if err3 == nil {
-						item.PublicIP = StrVal(vnicDetail.Vnic.PublicIp)
-						item.PrivateIP = StrVal(vnicDetail.Vnic.PrivateIp)
-						if len(vnicDetail.Vnic.Ipv6Addresses) > 0 {
-							item.IPv6 = vnicDetail.Vnic.Ipv6Addresses[0]
-						}
-						break
-					}
+		// Terminating instances have no usable VNIC; skip the extra calls.
+		if inst.LifecycleState != core.InstanceLifecycleStateTerminating && inst.Id != nil {
+			if vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, *inst.Id); err == nil {
+				item.PublicIP = StrVal(vnic.PublicIp)
+				item.PrivateIP = StrVal(vnic.PrivateIp)
+				if len(vnic.Ipv6Addresses) > 0 {
+					item.IPv6 = vnic.Ipv6Addresses[0]
 				}
 			}
 		}
@@ -123,60 +156,89 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 	return items, nil
 }
 
-// BuildCloudInitUserData generates cloud-init base64 script
+// shellSingleQuote quotes s for safe use inside single quotes in a POSIX shell.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// BuildCloudInitUserData generates the base64 cloud-init user_data script.
+//
+// Ubuntu 22.04/24.04 cloud images ship /etc/ssh/sshd_config.d/60-cloudimg-settings.conf with
+// "PasswordAuthentication no", and sshd honours the FIRST occurrence of a keyword. Appending to
+// that file therefore has no effect; a lexically earlier drop-in (00-*) is the reliable way.
 func BuildCloudInitUserData(loginMode, sshKey, rootPassword string, enableBBR bool) string {
 	var script strings.Builder
 	script.WriteString("#!/bin/bash\n")
-	script.WriteString("echo '=== Initializing OCI Instance ===' > /var/log/oci_init.log\n")
+	script.WriteString("exec >>/var/log/oci_init.log 2>&1\n")
+	script.WriteString("echo '=== Initializing OCI Instance ==='\n")
 
-	// 1. Flush & disable internal system firewalls completely
-	script.WriteString("# Flush internal firewalls\n")
-	script.WriteString("iptables -P INPUT ACCEPT || true\n")
-	script.WriteString("iptables -P FORWARD ACCEPT || true\n")
-	script.WriteString("iptables -P OUTPUT ACCEPT || true\n")
-	script.WriteString("iptables -F || true\n")
-	script.WriteString("iptables -X || true\n")
+	// 1. Flush the in-guest firewalls (OCI images ship iptables/ip6tables rules that reject everything but SSH)
+	script.WriteString("for fw in iptables ip6tables; do\n")
+	script.WriteString("  $fw -P INPUT ACCEPT || true; $fw -P FORWARD ACCEPT || true; $fw -P OUTPUT ACCEPT || true\n")
+	script.WriteString("  $fw -F || true; $fw -X || true\n")
+	script.WriteString("done\n")
 	script.WriteString("netfilter-persistent save || true\n")
 	script.WriteString("ufw disable || true\n")
 	script.WriteString("systemctl stop firewalld || true\n")
 	script.WriteString("systemctl disable firewalld || true\n")
 
-	// 2. Configure SSHD
+	// 2. SSH configuration
 	script.WriteString("mkdir -p /root/.ssh && chmod 700 /root/.ssh\n")
+	script.WriteString("mkdir -p /etc/ssh/sshd_config.d\n")
 
 	if loginMode == "root_password" && rootPassword != "" {
-		script.WriteString(fmt.Sprintf("echo 'root:%s' | chpasswd\n", rootPassword))
+		script.WriteString("printf '%s\\n' " + shellSingleQuote("root:"+rootPassword) + " | chpasswd\n")
+		script.WriteString("cat > /etc/ssh/sshd_config.d/00-oci-panel.conf <<'EOF'\n")
+		script.WriteString("PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n")
+		script.WriteString("EOF\n")
+		// Older images without an Include line
 		script.WriteString("sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config\n")
 		script.WriteString("sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n")
-		script.WriteString("echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf 2>/dev/null || true\n")
-		script.WriteString("echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config.d/60-cloudimg-settings.conf 2>/dev/null || true\n")
 	} else if sshKey != "" {
-		script.WriteString(fmt.Sprintf("echo '%s' >> /root/.ssh/authorized_keys\n", strings.TrimSpace(sshKey)))
+		script.WriteString("printf '%s\\n' " + shellSingleQuote(strings.TrimSpace(sshKey)) + " >> /root/.ssh/authorized_keys\n")
 		script.WriteString("chmod 600 /root/.ssh/authorized_keys\n")
+		script.WriteString("cat > /etc/ssh/sshd_config.d/00-oci-panel.conf <<'EOF'\n")
+		script.WriteString("PermitRootLogin prohibit-password\n")
+		script.WriteString("EOF\n")
 		script.WriteString("sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config\n")
 	}
-
+	// Ubuntu's default authorized_keys for root carries a "no-port-forwarding ... command=..." prefix that blocks root logins
+	script.WriteString("sed -i 's/^no-port-forwarding.*sleep 10\" //' /root/.ssh/authorized_keys 2>/dev/null || true\n")
 	script.WriteString("systemctl restart ssh || systemctl restart sshd || true\n")
 
-	// 3. Enable BBR
+	// 3. BBR
 	if enableBBR {
-		script.WriteString("# Enable BBR\n")
-		script.WriteString("echo 'net.core.default_qdisc=fq' >> /etc/sysctl.conf\n")
-		script.WriteString("echo 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf\n")
+		script.WriteString("grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf || printf '%s\\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf\n")
 		script.WriteString("sysctl -p || true\n")
 	}
 
 	return base64.StdEncoding.EncodeToString([]byte(script.String()))
 }
 
-// LaunchInstance launches a compute instance with Cloud-Init, VPU 120, and tags
+// normalizeVPU snaps a requested VPU/GB value to what the API accepts: 10, 20, 30…120.
+func normalizeVPU(vpu int64, allowZero bool) int64 {
+	if vpu <= 0 {
+		if allowZero {
+			return 0
+		}
+		return 10
+	}
+	if vpu < 10 {
+		return 10
+	}
+	if vpu > 120 {
+		return 120
+	}
+	return (vpu / 10) * 10
+}
+
+// LaunchInstance launches a compute instance with cloud-init, boot volume settings and tags
 func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, targetAD string) (string, error) {
 	computeClient, err := GetComputeClient(profile, task.Region)
 	if err != nil {
 		return "", err
 	}
 
-	// Prepare Freeform Tags
 	tags := map[string]string{
 		"created_by": "oci-panel",
 	}
@@ -184,18 +246,17 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		tags["root_password"] = task.RootPasswordEnc
 	}
 
-	// Prepare User Data
 	userDataB64 := BuildCloudInitUserData(task.LoginMode, task.SSHAuthorizedKeys, task.RootPasswordEnc, true)
 
-	vpu := task.BootVolumeVPU
-	if vpu < 10 {
-		vpu = 120 // Default 120 VPU Ultra High Performance (Boot volumes strictly require minimum 10 VPU)
+	vpu := normalizeVPU(task.BootVolumeVPU, false)
+	if task.BootVolumeVPU <= 0 {
+		vpu = 120 // legacy default of this panel
 	}
-	if vpu > 120 {
-		vpu = 120
+	bootSize := task.BootVolumeSizeInGBs
+	if bootSize < 50 {
+		bootSize = 50 // API minimum when a size is specified explicitly
 	}
 
-	// Launch Instance Details
 	details := core.LaunchInstanceDetails{
 		CompartmentId:      common.String(profile.TenancyOCID),
 		AvailabilityDomain: common.String(targetAD),
@@ -203,7 +264,7 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		Shape:              common.String(task.Shape),
 		SourceDetails: core.InstanceSourceViaImageDetails{
 			ImageId:             common.String(task.ImageOCID),
-			BootVolumeSizeInGBs: common.Int64(task.BootVolumeSizeInGBs),
+			BootVolumeSizeInGBs: common.Int64(bootSize),
 			BootVolumeVpusPerGB: common.Int64(vpu),
 		},
 		CreateVnicDetails: &core.CreateVnicDetails{
@@ -217,8 +278,11 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		},
 		FreeformTags: tags,
 	}
+	if task.LoginMode != "root_password" && strings.TrimSpace(task.SSHAuthorizedKeys) != "" {
+		// Also register the key through the platform so the default user works even if cloud-init fails
+		details.Metadata["ssh_authorized_keys"] = strings.TrimSpace(task.SSHAuthorizedKeys)
+	}
 
-	// Set shape config for flex shapes
 	if strings.Contains(task.Shape, "Flex") {
 		details.ShapeConfig = &core.LaunchInstanceShapeConfigDetails{
 			Ocpus:       common.Float32(float32(task.OCPU)),
@@ -226,11 +290,7 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		}
 	}
 
-	req := core.LaunchInstanceRequest{
-		LaunchInstanceDetails: details,
-	}
-
-	resp, err := computeClient.LaunchInstance(ctx, req)
+	resp, err := computeClient.LaunchInstance(ctx, core.LaunchInstanceRequest{LaunchInstanceDetails: details})
 	if err != nil {
 		return "", err
 	}
@@ -238,7 +298,7 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 	return StrVal(resp.Instance.Id), nil
 }
 
-// InstanceAction performs START, STOP, SOFTRESET, RESET
+// InstanceAction performs START, STOP (graceful), SOFTRESET, RESET
 func InstanceAction(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID, action string) error {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
@@ -259,40 +319,35 @@ func InstanceAction(ctx context.Context, profile *storage.OCIProfile, region, in
 		return fmt.Errorf("unsupported action: %s", action)
 	}
 
-	req := core.InstanceActionRequest{
+	_, err = computeClient.InstanceAction(ctx, core.InstanceActionRequest{
 		InstanceId: common.String(instanceOCID),
 		Action:     ociAction,
-	}
-
-	_, err = computeClient.InstanceAction(ctx, req)
+	})
 	return err
 }
 
-// TerminateInstance terminates an instance
+// TerminateInstance terminates an instance and its boot volume
 func TerminateInstance(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) error {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	req := core.TerminateInstanceRequest{
+	_, err = computeClient.TerminateInstance(ctx, core.TerminateInstanceRequest{
 		InstanceId:         common.String(instanceOCID),
 		PreserveBootVolume: common.Bool(false),
-	}
-
-	_, err = computeClient.TerminateInstance(ctx, req)
+	})
 	return err
 }
 
-// ResizeInstance stops, updates shape-config, and starts instance
+// ResizeInstance updates the flexible shape configuration (the service reboots the instance)
 func ResizeInstance(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string, newOCPU, newMem float32) error {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	// Update instance shape config
-	updateReq := core.UpdateInstanceRequest{
+	_, err = computeClient.UpdateInstance(ctx, core.UpdateInstanceRequest{
 		InstanceId: common.String(instanceOCID),
 		UpdateInstanceDetails: core.UpdateInstanceDetails{
 			ShapeConfig: &core.UpdateInstanceShapeConfigDetails{
@@ -300,31 +355,32 @@ func ResizeInstance(ctx context.Context, profile *storage.OCIProfile, region, in
 				MemoryInGBs: common.Float32(newMem),
 			},
 		},
-	}
-
-	_, err = computeClient.UpdateInstance(ctx, updateReq)
+	})
 	return err
 }
 
-// UpdateInstanceTags updates freeform tags on Oracle Cloud
+// UpdateInstanceTags replaces the instance's freeform tags (the caller merges with existing tags)
 func UpdateInstanceTags(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string, tags map[string]string) error {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	updateReq := core.UpdateInstanceRequest{
+	_, err = computeClient.UpdateInstance(ctx, core.UpdateInstanceRequest{
 		InstanceId: common.String(instanceOCID),
 		UpdateInstanceDetails: core.UpdateInstanceDetails{
 			FreeformTags: tags,
 		},
-	}
-
-	_, err = computeClient.UpdateInstance(ctx, updateReq)
+	})
 	return err
 }
 
-// RotatePublicIP rotates the public IPv4 of an instance
+// RotatePublicIP replaces the ephemeral public IPv4 of an instance's primary VNIC.
+//
+// Ephemeral public IPs are AD-scoped objects that can only be attached to the PRIMARY private IP
+// of a VNIC, and a private IP may hold at most one public IP. So: look the current public IP up
+// through the private IP, delete it if it is ephemeral (or merely unassign it if it is reserved,
+// which must never be destroyed), wait until it is gone, then create a new ephemeral one.
 func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (string, error) {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
@@ -335,62 +391,96 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 		return "", err
 	}
 
-	// 1. Get primary VNIC
-	vnicList, err := computeClient.ListVnicAttachments(ctx, core.ListVnicAttachmentsRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		InstanceId:    common.String(instanceOCID),
-	})
-	if err != nil || len(vnicList.Items) == 0 {
+	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	if err != nil {
 		return "", fmt.Errorf("unable to find VNIC for instance: %w", err)
 	}
-	vnicID := vnicList.Items[0].VnicId
 
-	// 2. Get Private IP OCID
-	_, err = netClient.GetVnic(ctx, core.GetVnicRequest{VnicId: vnicID})
+	// Primary private IP of the primary VNIC
+	privResp, err := netClient.ListPrivateIps(ctx, core.ListPrivateIpsRequest{VnicId: vnic.Id})
 	if err != nil {
-		return "", fmt.Errorf("unable to get VNIC detail: %w", err)
+		return "", fmt.Errorf("unable to list private IPs: %w", err)
+	}
+	var privIPID *string
+	for _, p := range privResp.Items {
+		if BoolVal(p.IsPrimary) && p.Id != nil {
+			privIPID = p.Id
+			break
+		}
+	}
+	if privIPID == nil && len(privResp.Items) > 0 {
+		privIPID = privResp.Items[0].Id
+	}
+	if privIPID == nil {
+		return "", fmt.Errorf("unable to find the primary private IP of the VNIC")
 	}
 
-	privIPList, err := netClient.ListPrivateIps(ctx, core.ListPrivateIpsRequest{
-		VnicId: vnicID,
+	// Current public IP (404 means none assigned)
+	pubResp, err := netClient.GetPublicIpByPrivateIpId(ctx, core.GetPublicIpByPrivateIpIdRequest{
+		GetPublicIpByPrivateIpIdDetails: core.GetPublicIpByPrivateIpIdDetails{PrivateIpId: privIPID},
 	})
-	if err != nil || len(privIPList.Items) == 0 {
-		return "", fmt.Errorf("unable to find private IP: %w", err)
+	if err != nil && !IsNotFoundError(err) {
+		return "", fmt.Errorf("unable to look up current public IP: %w", err)
 	}
-	privIPID := privIPList.Items[0].Id
-
-	// 3. Find and delete existing Ephemeral Public IP
-	pubIPList, err := netClient.ListPublicIps(ctx, core.ListPublicIpsRequest{
-		Scope:         core.ListPublicIpsScopeRegion,
-		CompartmentId: common.String(profile.TenancyOCID),
-	})
-	if err == nil {
-		for _, pub := range pubIPList.Items {
-			if pub.AssignedEntityId != nil && *pub.AssignedEntityId == *privIPID {
-				_, _ = netClient.DeletePublicIp(ctx, core.DeletePublicIpRequest{PublicIpId: pub.Id})
-				time.Sleep(3 * time.Second)
+	if err == nil && pubResp.PublicIp.Id != nil {
+		switch pubResp.PublicIp.Lifetime {
+		case core.PublicIpLifetimeReserved:
+			// Keep the reserved address; just detach it so a fresh ephemeral one can be assigned.
+			if _, err := netClient.UpdatePublicIp(ctx, core.UpdatePublicIpRequest{
+				PublicIpId:            pubResp.PublicIp.Id,
+				UpdatePublicIpDetails: core.UpdatePublicIpDetails{PrivateIpId: common.String("")},
+			}); err != nil {
+				return "", fmt.Errorf("unable to unassign reserved public IP: %w", err)
+			}
+		default:
+			if _, err := netClient.DeletePublicIp(ctx, core.DeletePublicIpRequest{PublicIpId: pubResp.PublicIp.Id}); err != nil && !IsNotFoundError(err) {
+				return "", fmt.Errorf("unable to release current public IP: %w", err)
+			}
+		}
+		// Wait until the old public IP is really gone / detached
+		deadline := time.Now().Add(45 * time.Second)
+		for time.Now().Before(deadline) {
+			cur, err := netClient.GetPublicIp(ctx, core.GetPublicIpRequest{PublicIpId: pubResp.PublicIp.Id})
+			if IsNotFoundError(err) || (err == nil && (cur.PublicIp.LifecycleState == core.PublicIpLifecycleStateTerminated || cur.PublicIp.LifecycleState == core.PublicIpLifecycleStateAvailable)) {
 				break
+			}
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(2 * time.Second):
 			}
 		}
 	}
 
-	// 4. Create new Ephemeral Public IP
-	createReq := core.CreatePublicIpRequest{
+	// New ephemeral public IP
+	createResp, err := netClient.CreatePublicIp(ctx, core.CreatePublicIpRequest{
 		CreatePublicIpDetails: core.CreatePublicIpDetails{
 			CompartmentId: common.String(profile.TenancyOCID),
 			Lifetime:      core.CreatePublicIpDetailsLifetimeEphemeral,
 			PrivateIpId:   privIPID,
+			DisplayName:   common.String(StrVal(vnic.DisplayName) + "-public-ip"),
 		},
-	}
-	createResp, err := netClient.CreatePublicIp(ctx, createReq)
+	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create new public IP: %w", err)
 	}
 
-	return StrVal(createResp.PublicIp.IpAddress), nil
+	newIP := StrVal(createResp.PublicIp.IpAddress)
+	if newIP == "" && createResp.PublicIp.Id != nil {
+		// The address can take a moment to be allocated
+		for i := 0; i < 10 && newIP == ""; i++ {
+			time.Sleep(2 * time.Second)
+			cur, err := netClient.GetPublicIp(ctx, core.GetPublicIpRequest{PublicIpId: createResp.PublicIp.Id})
+			if err == nil {
+				newIP = StrVal(cur.PublicIp.IpAddress)
+			}
+		}
+	}
+	return newIP, nil
 }
 
-// AttachIPv6ToInstance attaches an IPv6 address to an existing instance
+// AttachIPv6ToInstance allocates an IPv6 address on the instance's primary VNIC.
+// The subnet must have an IPv6 prefix, otherwise the API returns 400.
 func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (string, error) {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
@@ -401,33 +491,55 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 		return "", err
 	}
 
-	vnicList, err := computeClient.ListVnicAttachments(ctx, core.ListVnicAttachmentsRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		InstanceId:    common.String(instanceOCID),
-	})
-	if err != nil || len(vnicList.Items) == 0 {
+	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	if err != nil {
 		return "", fmt.Errorf("unable to find VNIC for instance: %w", err)
 	}
-	vnicID := vnicList.Items[0].VnicId
-
-	// Create IPv6 on VNIC
-	createReq := core.CreateIpv6Request{
-		CreateIpv6Details: core.CreateIpv6Details{
-			VnicId: vnicID,
-		},
+	if len(vnic.Ipv6Addresses) > 0 {
+		return vnic.Ipv6Addresses[0], nil
 	}
-	resp, err := netClient.CreateIpv6(ctx, createReq)
+
+	resp, err := netClient.CreateIpv6(ctx, core.CreateIpv6Request{
+		CreateIpv6Details: core.CreateIpv6Details{VnicId: vnic.Id},
+	})
 	if err != nil {
-		return "", fmt.Errorf("failed to allocate IPv6: %w", err)
+		return "", fmt.Errorf("failed to allocate IPv6 (the subnet must be IPv6-enabled): %w", err)
 	}
 
 	return StrVal(resp.Ipv6.IpAddress), nil
 }
 
-// ProbeIPPort tests TCP connection on port
+// GetInstanceAddresses returns the lifecycle state and the primary VNIC's public IPv4 / IPv6
+// of one instance. The VNIC only becomes ATTACHED (and gets its public IP) while the instance
+// is starting, so callers poll this until the state is RUNNING.
+func GetInstanceAddresses(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (state, pubIP, ipv6 string, err error) {
+	computeClient, err := GetComputeClient(profile, region)
+	if err != nil {
+		return "", "", "", err
+	}
+	netClient, err := GetVirtualNetworkClient(profile, region)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	instResp, err := computeClient.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(instanceOCID)})
+	if err != nil {
+		return "", "", "", err
+	}
+	state = string(instResp.Instance.LifecycleState)
+
+	if vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID); err == nil {
+		pubIP = StrVal(vnic.PublicIp)
+		if len(vnic.Ipv6Addresses) > 0 {
+			ipv6 = vnic.Ipv6Addresses[0]
+		}
+	}
+	return state, pubIP, ipv6, nil
+}
+
+// ProbeIPPort tests a TCP connection to ip:port
 func ProbeIPPort(ip string, port int, timeout time.Duration) bool {
-	target := net.JoinHostPort(ip, fmt.Sprint(port))
-	conn, err := net.DialTimeout("tcp", target, timeout)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, fmt.Sprint(port)), timeout)
 	if err != nil {
 		return false
 	}

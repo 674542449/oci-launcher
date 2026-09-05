@@ -51,6 +51,13 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD:-OciRedisPass998!}
       - MASTER_KEY=${MASTER_KEY:-SuperMasterSecretKey32BytesLong!}
       - ALLOWED_IPS=${ALLOWED_IPS:-}
+      # Proxies whose X-Real-IP header is trusted (default: docker private ranges = the nginx container)
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-}
+      # Always Free allowances enforced by the zero-cost guard (Oracle docs, 2026-09: A1 2 OCPU / 12 GB)
+      - FREE_A1_OCPU=${FREE_A1_OCPU:-2}
+      - FREE_A1_MEMORY_GB=${FREE_A1_MEMORY_GB:-12}
+      - FREE_STORAGE_GB=${FREE_STORAGE_GB:-200}
+      - FREE_MICRO_COUNT=${FREE_MICRO_COUNT:-2}
     volumes:
       - ~/.oci:/root/.oci:ro
       - app_data:/app/data

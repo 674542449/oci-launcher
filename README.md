@@ -8,20 +8,20 @@
 
 ### 1. 100% 免费额度零成本硬隔离 (Always Free Guard)
 - **严格硬锁边界**：
-  - **ARM 架构 (VM.Standard.A1.Flex)**：严格限制总配额 ≤ 4 OCPU / 24 GB 内存。
+  - **ARM 架构 (VM.Standard.A1.Flex)**：按 Oracle 官方文档（每月 1,500 OCPU 小时 + 9,000 GB 小时）限制总配额 ≤ **2 OCPU / 12 GB**；租户限额更低时以限额为准。可通过 `FREE_A1_OCPU` / `FREE_A1_MEMORY_GB` 环境变量调整。
   - **AMD 架构 (VM.Standard.E2.1.Micro)**：严格限制总配额 ≤ 2 实例（各 1 OCPU / 1 GB 内存）。
-  - **启动卷存储 (Boot Volumes)**：单实例最小 47 GB，多实例总容量严格限制 ≤ 200 GB。
+  - **启动卷存储 (Boot Volumes)**：指定容量时 API 最小 50 GB，引导卷 + 块存储总容量严格限制 ≤ 200 GB（`FREE_STORAGE_GB`）。
   - **出站流量监控**：实时采集并监控 10 TB / 月免费出站流量指标（BytesOut），超限阈值自动告警。
 - **开机前拦截校验**：在任务入库与执行前，通过并发实时探测当前租户已用资源与未终止实例，超限时**硬性拒绝并提示具体超额项目**，杜绝产生扣费。
 
 ### 2. 双轨账号属性智能侦测 (Free Tier vs PAYG / Promo)
-- **官方 API 首选验证**：调用 Oracle 官方 `osubsubscription.SubscriptionClient.ListSubscriptions` 接口，直接获取订阅类型（`FREE_TIER` / `PAYG` / `PROMOTION`）。
-- **配额服务降级推断 (Fallback)**：当订阅接口无权限时，自动并发探测 `standard-a1-core-count` 服务限制（免费号通常限制为 0 或 2~4，付费号通常 ≥ 4 且具备不同配额）。
+- **服务限额探测**：在主区域查询 `standard-a1-core-count` / `standard-a1-memory-count` 服务限制（Always Free 租户为小额固定上限，已升级的 PAYG 租户通常为 16 及以上），据此判定 `FREE_TIER` / `PAYG`，判定依据在仪表盘完整展示。
+- **主区域自动解析**：通过 `ListRegionSubscriptions` 取得主区域名称（如 `ap-tokyo-1`），免费资源只允许在主区域创建。
 - **透明画像与手动覆核**：Dashboard 提供完整的侦测证据链展示卡，并支持用户一键手动切换账号标签。
 
 ### 3. 全动态镜像解析与极速存储
-- **全动态 Ubuntu 发现**：严格通过 OCI 镜像 Catalog 实时检索 Canonical 官方 Ubuntu 镜像，按语义版本自动提取最新两代 LTS 发行版（**Ubuntu 26.04 LTS** 与 **Ubuntu 24.04 LTS**），自动适配 ARM64 (`aarch64`) 与 AMD64 (`x86_64`)。
-- **默认最高 120 VPU**：开机创建启动卷时默认开启 Ultra High Performance（**120 VPU/GB**，最高提供 50,000 IOPS），并严格遵循 OCI 官方规范支持引导卷在 10~120 VPU 间（引导卷法定最低 10 VPU）、块存储在 0~120 VPU 间无损在线滑块调速。
+- **全动态 Ubuntu 发现**：通过 OCI 镜像目录实时检索 Canonical 官方 Ubuntu 平台镜像（仅 AVAILABLE 状态），按版本号提取最新两代 LTS 发行版，并按 Shape 自动适配 ARM64 (`aarch64`) 与 AMD64 (`x86_64`)。
+- **VPU 性能档位**：开机时可选择引导卷性能档位（默认 120 VPU/GB）。注意：Always Free 只包含存储容量，不包含性能单元，**在已升级的 PAYG 租户上高于 10 VPU 的档位会按 VPU 计费**；引导卷支持 10~120 VPU、块存储支持 0~120 VPU 在线调整。
 
 ### 4. 双登录凭证与密码标签溯源
 - **登录方式支持**：
@@ -108,29 +108,34 @@ chmod +x deploy.sh
 在项目根目录创建 `.env` 文件：
 
 ```ini
-# 服务端口与绑定（建议仅绑定 127.0.0.1）
-BIND_ADDR=127.0.0.1
-PORT=8080
+# PostgreSQL
+POSTGRES_DB=oci_panel
+POSTGRES_USER=oci_admin
+POSTGRES_PASSWORD=YOUR_SUPER_STRONG_DB_PASSWORD
 
-# 数据库配置
-DB_USER=oci_admin
-DB_PASSWORD=YOUR_SUPER_STRONG_DB_PASSWORD_32_CHARS
-DB_NAME=oci_launcher
+# Redis
+REDIS_PASSWORD=YOUR_SUPER_STRONG_REDIS_PASSWORD
 
-# Redis 配置
-REDIS_PASSWORD=YOUR_SUPER_STRONG_REDIS_PASSWORD_32_CHARS
+# 主密钥：加密所有 OCI 私钥并派生会话签名密钥（至少 16 位随机字符串；生产环境保留默认值将拒绝启动）
+MASTER_KEY=YOUR_RANDOM_MASTER_KEY
 
-# 系统安全与信封加密密钥 (必须为 32 字节字符串)
-ENCRYPTION_KEY=YOUR_32_BYTE_HEX_AES_ENCRYPT_KEY
-JWT_SECRET=YOUR_SUPER_STRONG_JWT_SECRET_STRING
+# 可选：后端 IP 白名单（逗号分隔 IP 或 CIDR）
+ALLOWED_IPS=
 
-# Telegram 告警配置 (可选)
-TELEGRAM_BOT_TOKEN=
-TELEGRAM_CHAT_ID=
+# 可选：信任其 X-Real-IP 头的反向代理网段，默认为 Docker 私有网段；后端直接暴露时填 none
+TRUSTED_PROXIES=
 
-# Cloudflare Tunnel 令牌 (如使用隧道零端口暴露，填入此处)
-CF_TUNNEL_TOKEN=
+# 可选：Always Free 额度（默认按 Oracle 2026-09 文档：A1 2 OCPU / 12 GB，存储 200 GB，Micro 2 台）
+FREE_A1_OCPU=2
+FREE_A1_MEMORY_GB=12
+FREE_STORAGE_GB=200
+FREE_MICRO_COUNT=2
+
+# 可选：Cloudflare Tunnel 令牌
+CLOUDFLARE_TUNNEL_TOKEN=
 ```
+
+Telegram Bot Token 与 Chat ID 在面板「设置」页填写，不需要写入 `.env`。
 
 #### 2. 构建并启动容器集群
 
@@ -157,13 +162,13 @@ docker compose logs -f backend
 2. **获取 Tunnel Token**：
    - 复制页面中显示的 Token（即 `--token` 后面的字符串）。
 3. **启用 Tunnel 容器**：
-   - 将 Token 填入根目录 `.env` 的 `CF_TUNNEL_TOKEN` 项：
+   - 将 Token 填入根目录 `.env` 的 `CLOUDFLARE_TUNNEL_TOKEN` 项：
      ```ini
-     CF_TUNNEL_TOKEN=eyJhIjoiYmMy...
+     CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoiYmMy...
      ```
-   - 启动 cloudflared 服务：
+   - 取消 `docker-compose.yml` 中 `cloudflared` 服务的注释（或新建 `docker-compose.override.yml` 添加该服务），然后启动：
      ```bash
-     docker compose --profile tunnel up -d cloudflared
+     docker compose up -d
      ```
 4. **配置公共主机名 (Public Hostname)**：
    - 在 Cloudflare Tunnel 的 **Public Hostnames** 标签页中添加路由：

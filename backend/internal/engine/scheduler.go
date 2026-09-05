@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 
@@ -10,16 +11,33 @@ import (
 	"github.com/google/uuid"
 )
 
-var (
-	activeTasks sync.Map // taskID (string) -> context.CancelFunc
-)
+type workerHandle struct {
+	cancel context.CancelFunc
+}
 
-// StartTask initiates the background worker for a task
+var activeTasks sync.Map // taskID (string) -> *workerHandle
+
+// cancelWorker stops the goroutine of a task without touching the database.
+func cancelWorker(taskID uuid.UUID) {
+	key := taskID.String()
+	if v, ok := activeTasks.Load(key); ok {
+		if h, ok2 := v.(*workerHandle); ok2 {
+			h.cancel()
+			activeTasks.CompareAndDelete(key, v)
+		}
+	}
+}
+
+// IsTaskActive reports whether a worker goroutine is registered for the task.
+func IsTaskActive(taskID uuid.UUID) bool {
+	_, ok := activeTasks.Load(taskID.String())
+	return ok
+}
+
+// StartTask (re)starts the background worker for a task.
 func StartTask(taskID uuid.UUID) error {
-	// Stop existing worker if already running
-	StopTask(taskID)
+	cancelWorker(taskID)
 
-	// Update DB status
 	err := storage.DB.Model(&storage.LaunchTask{}).
 		Where("id = ?", taskID).
 		Updates(map[string]interface{}{
@@ -31,13 +49,22 @@ func StartTask(taskID uuid.UUID) error {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	activeTasks.Store(taskID.String(), cancel)
+	handle := &workerHandle{cancel: cancel}
+	key := taskID.String()
+	activeTasks.Store(key, handle)
 
 	go func() {
 		defer func() {
-			activeTasks.Delete(taskID.String())
+			// Only remove our own registration: a restarted task may already own a newer handle.
+			activeTasks.CompareAndDelete(key, handle)
 			if r := recover(); r != nil {
 				log.Printf("[Scheduler] Worker panic recovered for task %s: %v", taskID, r)
+				_ = storage.DB.Model(&storage.LaunchTask{}).
+					Where("id = ? AND status = ?", taskID, "running").
+					Updates(map[string]interface{}{
+						"status":       "failed",
+						"last_message": fmt.Sprintf("内部错误，任务已停止: %v", r),
+					}).Error
 			}
 		}()
 		RunTaskWorker(ctx, taskID)
@@ -46,24 +73,19 @@ func StartTask(taskID uuid.UUID) error {
 	return nil
 }
 
-// StopTask cancels the background worker for a task
+// StopTask cancels the worker and marks a running task as stopped (terminal states are kept).
 func StopTask(taskID uuid.UUID) {
-	if cancelVal, ok := activeTasks.Load(taskID.String()); ok {
-		if cancel, ok2 := cancelVal.(context.CancelFunc); ok2 {
-			cancel()
-		}
-		activeTasks.Delete(taskID.String())
-	}
+	cancelWorker(taskID)
 
 	_ = storage.DB.Model(&storage.LaunchTask{}).
-		Where("id = ?", taskID).
+		Where("id = ? AND status = ?", taskID, "running").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
 			"last_message": "用户手动停止抢机任务",
 		}).Error
 }
 
-// ResumeAllRunningTasks recovers running tasks upon server restart
+// ResumeAllRunningTasks recovers running tasks after a restart
 func ResumeAllRunningTasks() {
 	var tasks []storage.LaunchTask
 	if err := storage.DB.Where("status = ?", "running").Find(&tasks).Error; err == nil {
@@ -74,13 +96,14 @@ func ResumeAllRunningTasks() {
 	}
 }
 
-// PanicLockdown stops all tasks and freezes operations
+// PanicLockdown stops all workers and marks their tasks stopped
 func PanicLockdown() {
-	log.Println("🚨 [Scheduler] PANIC LOCKDOWN TRIGGERED! Stopping all active workers...")
+	log.Println("[Scheduler] PANIC LOCKDOWN TRIGGERED! Stopping all active workers...")
 	activeTasks.Range(func(key, value interface{}) bool {
-		if cancel, ok := value.(context.CancelFunc); ok {
-			cancel()
+		if h, ok := value.(*workerHandle); ok {
+			h.cancel()
 		}
+		activeTasks.Delete(key)
 		return true
 	})
 

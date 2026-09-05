@@ -1,0 +1,12 @@
+# dependencies / build output
+frontend/node_modules/
+frontend/dist/
+backend/oci-server
+
+# local secrets & overrides
+.env
+docker-compose.override.yml
+
+# editor / tooling
+.claude/
+.DS_Store

@@ -4,17 +4,14 @@ import (
 	"net/http"
 
 	"oci-panel/internal/oci"
-	"oci-panel/internal/storage"
 
 	"github.com/gin-gonic/gin"
 )
 
 // GetQuota returns dual-track account type detection, live compute usage, and 200GB storage progress
 func GetQuota(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 
@@ -31,10 +28,8 @@ func GetQuota(c *gin.Context) {
 
 // GetTraffic returns monthly outbound traffic (BytesOut) vs 10 TB limit
 func GetTraffic(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 

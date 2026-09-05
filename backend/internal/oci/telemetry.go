@@ -14,20 +14,24 @@ import (
 type OutboundTrafficSummary struct {
 	UsedBytes        float64 `json:"used_bytes"`
 	UsedTB           float64 `json:"used_tb"`
-	MaxTB            float64 `json:"max_tb"` // 10.0 TB Always Free
+	MaxTB            float64 `json:"max_tb"` // 10 TB per month, Always Free
 	UsedPercent      float64 `json:"used_percent"`
 	AlertLevel       string  `json:"alert_level"` // "normal", "warning" (>=80%), "critical" (>=95%)
 	AlertDescription string  `json:"alert_description"`
 }
 
-// GetMonthlyOutboundTraffic queries OCI Monitoring API for BytesOut
+// GetMonthlyOutboundTraffic sums VnicToNetworkBytes (bytes leaving every VNIC) for the current
+// calendar month via the Monitoring API.
+//
+// Notes on accuracy: the metric counts all bytes the VNICs send, including traffic that stays
+// inside the VCN, so it over-estimates internet egress (conservative for a "stay free" goal).
+// The 10 TB allowance is treated as decimal (1 TB = 1e12 bytes), which is also the conservative reading.
 func GetMonthlyOutboundTraffic(ctx context.Context, profile *storage.OCIProfile, region string) (*OutboundTrafficSummary, error) {
 	monClient, err := GetMonitoringClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
 
-	// Calculate start of current natural month
 	now := time.Now().UTC()
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
@@ -42,34 +46,37 @@ func GetMonthlyOutboundTraffic(ctx context.Context, profile *storage.OCIProfile,
 		},
 	}
 
+	resp, err := monClient.SummarizeMetricsData(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("monitoring query failed: %w", err)
+	}
+
+	var totalBytes float64
+	for _, item := range resp.Items {
+		for _, dp := range item.AggregatedDatapoints {
+			if dp.Value != nil {
+				totalBytes += *dp.Value
+			}
+		}
+	}
+
 	summary := &OutboundTrafficSummary{
+		UsedBytes:  totalBytes,
+		UsedTB:     totalBytes / 1e12,
 		MaxTB:      10.0,
 		AlertLevel: "normal",
 	}
-
-	resp, err := monClient.SummarizeMetricsData(ctx, req)
-	if err == nil && len(resp.Items) > 0 {
-		var totalBytes float64
-		for _, item := range resp.Items {
-			for _, dp := range item.AggregatedDatapoints {
-				if dp.Value != nil {
-					totalBytes += *dp.Value
-				}
-			}
-		}
-		summary.UsedBytes = totalBytes
-		summary.UsedTB = totalBytes / (1024 * 1024 * 1024 * 1024)
-	}
-
 	summary.UsedPercent = (summary.UsedTB / summary.MaxTB) * 100.0
-	if summary.UsedPercent >= 95.0 {
+
+	switch {
+	case summary.UsedPercent >= 95.0:
 		summary.AlertLevel = "critical"
-		summary.AlertDescription = fmt.Sprintf("【高危超额警报】当月出站流量已达 %0.2f TB (%0.1f%%)，极为接近 10 TB 免费红线！请立即控制流量避免扣费！", summary.UsedTB, summary.UsedPercent)
-	} else if summary.UsedPercent >= 80.0 {
+		summary.AlertDescription = fmt.Sprintf("当月出站流量已达 %0.2f TB（%0.1f%%），即将触及 10 TB 免费上限，超出部分按量计费", summary.UsedTB, summary.UsedPercent)
+	case summary.UsedPercent >= 80.0:
 		summary.AlertLevel = "warning"
-		summary.AlertDescription = fmt.Sprintf("【流量预警】当月出站流量已达 %0.2f TB (%0.1f%%)，已超过 80%% 警戒水位。", summary.UsedTB, summary.UsedPercent)
-	} else {
-		summary.AlertDescription = fmt.Sprintf("当月出站流量健康: %0.2f TB / 10 TB 免费额度 (%0.1f%%)", summary.UsedTB, summary.UsedPercent)
+		summary.AlertDescription = fmt.Sprintf("当月出站流量已达 %0.2f TB（%0.1f%%），超过 80%% 警戒线", summary.UsedTB, summary.UsedPercent)
+	default:
+		summary.AlertDescription = fmt.Sprintf("当月出站流量 %0.2f TB / 10 TB（%0.1f%%），含 VCN 内部流量的保守估算", summary.UsedTB, summary.UsedPercent)
 	}
 
 	return summary, nil

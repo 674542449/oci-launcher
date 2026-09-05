@@ -26,6 +26,17 @@ func main() {
 	cfg := config.LoadConfig()
 	log.Printf("[Init] 运行环境: %s, 端口: %d", cfg.AppEnv, cfg.AppPort)
 
+	// The master key encrypts every OCI private key and derives the session-signing key.
+	// Running with the public default would let anyone forge an admin session.
+	if cfg.MasterKey == "SuperMasterSecretKey32BytesLong!" || len(cfg.MasterKey) < 16 {
+		if cfg.AppEnv == "production" {
+			log.Fatalf("[FATAL] MASTER_KEY 未设置或仍为默认值，拒绝在生产环境启动。请在 .env 中设置至少 16 位的随机 MASTER_KEY")
+		}
+		log.Printf("[WARN] MASTER_KEY 为默认值，仅允许在非生产环境使用")
+	}
+	log.Printf("[Init] Always Free 额度: A1 %.0f OCPU / %.0f GB, 存储 %d GB, Micro %d 台",
+		cfg.FreeA1OCPU, cfg.FreeA1MemoryGB, cfg.FreeStorageGB, cfg.FreeMicroCount)
+
 	// 2. Initialize PostgreSQL
 	_, err := storage.InitDB(cfg.DBDSN)
 	if err != nil {

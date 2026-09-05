@@ -1,161 +1,104 @@
 <template>
-  <div class="space-y-6">
-    <!-- Header -->
-    <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
-      <div>
-        <h2 class="text-xl font-bold text-gray-900">实例与网络管理</h2>
-        <p class="text-xs text-gray-500">全生命周期管理 · 一键更换公网 IP · 在线改配 · 附加 IPv6 · 密码标签查看与修改</p>
-      </div>
-      <div class="flex items-center space-x-3">
-        <n-button :loading="loading" type="primary" secondary @click="fetchInstances">
-          🔄 刷新实例列表
+  <div>
+    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6，以及保存在云端标签里的 Root 密码。">
+      <template #actions>
+        <n-button secondary :loading="loading" :disabled="!currentProfile" @click="fetchInstances">
+          <template #icon><n-icon><RefreshOutline /></n-icon></template>
+          刷新
         </n-button>
-      </div>
+      </template>
+    </PageHeader>
+
+    <div class="notice notice-info mb-4">
+      <n-icon size="18" class="mt-0.5 shrink-0"><InformationCircleOutline /></n-icon>
+      <span>Oracle 会回收连续 7 天 CPU、网络与内存使用率都低于 20% 的 Always Free 实例。长期空闲的机器请保持一定负载。</span>
     </div>
 
-    <!-- Idle Reclaim Warning Card -->
-    <div class="p-4 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-center space-x-2">
-      <span>🛡️</span>
-      <span><b>官方闲置回收政策提醒:</b> 连续 7 天内 CPU、网络与内存使用率均低于 20% 的 Always Free 实例可能会被甲骨文系统判定为闲置并回收，请合理规划负载。</span>
-    </div>
+    <div class="card overflow-hidden">
+      <!-- loading -->
+      <div v-if="loading && instances.length === 0" class="divide-y divide-line">
+        <div v-for="i in 3" :key="i" class="flex items-center gap-6 px-5 py-4">
+          <n-skeleton text width="22%" />
+          <n-skeleton text width="12%" />
+          <n-skeleton text width="18%" />
+          <n-skeleton text width="20%" />
+        </div>
+      </div>
 
-    <!-- Instances Table -->
-    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-      <div v-if="loading && instances.length === 0" class="p-12 text-center text-gray-400">
-        正在拉取实例与网络信息...
-      </div>
-      <div v-else-if="instances.length === 0" class="p-12 text-center text-gray-400">
-        当前账号在主区域暂无存活实例
-      </div>
-      <div v-else class="overflow-x-auto">
-        <table class="min-w-full divide-y divide-gray-200 text-left text-xs">
-          <thead class="bg-gray-50 text-gray-500 font-medium">
+      <!-- empty -->
+      <EmptyState
+        v-else-if="instances.length === 0"
+        title="这个账号在主区域没有实例"
+        description="创建一个抢机任务，拿到容量后实例会出现在这里。"
+      >
+        <n-button type="primary" @click="$router.push('/launcher')">去抢机</n-button>
+      </EmptyState>
+
+      <!-- table -->
+      <div v-else class="tbl-wrap">
+        <table class="tbl">
+          <thead>
             <tr>
-              <th class="px-6 py-3">实例名称 / OCID</th>
-              <th class="px-6 py-3">运行状态</th>
-              <th class="px-6 py-3">硬件规格</th>
-              <th class="px-6 py-3">网络地址 (IPv4 / IPv6)</th>
-              <th class="px-6 py-3">Root 密码 (云端标签)</th>
-              <th class="px-6 py-3 text-right">操作管理</th>
+              <th>实例</th>
+              <th>状态</th>
+              <th>规格</th>
+              <th>网络</th>
+              <th>Root 密码</th>
+              <th class="text-right">操作</th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-gray-100 text-gray-700">
-            <tr v-for="inst in instances" :key="inst.ocid" class="hover:bg-gray-50/80 transition-colors">
-              <!-- Name & OCID -->
-              <td class="px-6 py-4">
-                <div class="font-bold text-gray-900 text-sm">{{ inst.display_name }}</div>
-                <div class="text-gray-400 font-mono text-[10px]">{{ maskOCID(inst.ocid) }}</div>
-                <div class="text-[10px] text-gray-400">{{ inst.ad }} · {{ inst.time_created }}</div>
+          <tbody>
+            <tr v-for="inst in instances" :key="inst.ocid">
+              <td class="min-w-[220px]">
+                <div class="text-[14px] font-semibold text-ink">{{ inst.display_name }}</div>
+                <div class="mono mt-0.5 text-xs text-ink-3" :title="inst.ocid">{{ maskOCID(inst.ocid) }}</div>
+                <div class="mono mt-0.5 text-xs text-ink-3">{{ shortAD(inst.ad) }} · {{ formatDate(inst.time_created) }}</div>
               </td>
-
-              <!-- State -->
-              <td class="px-6 py-4">
-                <span
-                  class="px-2.5 py-1 rounded-full text-xs font-semibold"
-                  :class="inst.state === 'RUNNING' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : (inst.state === 'STOPPED' ? 'bg-gray-100 text-gray-700' : 'bg-amber-50 text-amber-700 animate-pulse')"
-                >
-                  {{ inst.state }}
-                </span>
+              <td><StatusPill :state="inst.state" /></td>
+              <td class="whitespace-nowrap">
+                <div class="mono text-[13px] text-ink">{{ inst.shape }}</div>
+                <div class="mono mt-0.5 text-xs text-ink-3">{{ inst.ocpu }} OCPU · {{ inst.memory_in_gbs }} GB</div>
               </td>
-
-              <!-- Specs -->
-              <td class="px-6 py-4">
-                <div class="font-medium text-gray-900">{{ inst.shape }}</div>
-                <div class="text-gray-500 text-[11px]">{{ inst.ocpu }} OCPU / {{ inst.memory_in_gbs }} GB 内存</div>
-              </td>
-
-              <!-- IPs -->
-              <td class="px-6 py-4 space-y-1 font-mono">
-                <div v-if="inst.public_ip" class="flex items-center space-x-1">
-                  <span class="text-gray-900 font-bold">{{ inst.public_ip }}</span>
-                  <button @click="copyText(inst.public_ip)" class="text-blue-500 hover:underline text-[10px]">复制</button>
-                  <button @click="probeIP(inst.public_ip)" class="text-gray-400 hover:text-gray-600 text-[10px]">探测</button>
-                </div>
-                <div v-else class="text-gray-400 text-[11px]">无公网 IPv4</div>
-
-                <div v-if="inst.ipv6" class="text-[11px] text-purple-600 truncate max-w-[180px]" :title="inst.ipv6">
-                  IPv6: {{ inst.ipv6 }}
-                </div>
-              </td>
-
-              <!-- Root Password Tag -->
-              <td class="px-6 py-4">
-                <div v-if="inst.root_password" class="flex items-center space-x-1.5 font-mono">
-                  <span class="bg-gray-100 px-2 py-0.5 rounded text-gray-800 text-xs">
-                    {{ showPasswordMap[inst.ocid] ? inst.root_password : '••••••••••••' }}
-                  </span>
-                  <button
-                    @click="showPasswordMap[inst.ocid] = !showPasswordMap[inst.ocid]"
-                    class="text-gray-400 hover:text-gray-600 text-xs"
-                  >
-                    {{ showPasswordMap[inst.ocid] ? '🙈' : '👁️' }}
+              <td class="min-w-[220px]">
+                <div v-if="inst.public_ip" class="flex items-center gap-2">
+                  <span class="mono text-[13px] font-medium text-ink">{{ inst.public_ip }}</span>
+                  <button type="button" class="txt-btn" @click="copyText(inst.public_ip, '公网 IP')">复制</button>
+                  <button type="button" class="txt-btn-muted" :disabled="probing === inst.public_ip" @click="probeIP(inst.public_ip)">
+                    {{ probing === inst.public_ip ? '探测中…' : '探测 22' }}
                   </button>
-                  <button @click="copyText(inst.root_password)" class="text-blue-500 hover:underline text-[10px]">复制</button>
                 </div>
-                <div v-else class="text-gray-400 text-[11px]">
-                  未设置或为密钥模式
+                <div v-else class="text-xs text-ink-3">无公网 IPv4</div>
+                <div v-if="inst.ipv6" class="mt-1 flex items-center gap-2">
+                  <span class="mono max-w-[200px] truncate text-xs text-ink-2" :title="inst.ipv6">{{ inst.ipv6 }}</span>
+                  <button type="button" class="txt-btn" @click="copyText(inst.ipv6, 'IPv6')">复制</button>
                 </div>
               </td>
-
-              <!-- Actions -->
-              <td class="px-6 py-4 text-right space-x-1.5">
-                <!-- Power Actions -->
-                <n-button
-                  v-if="inst.state === 'STOPPED'"
-                  size="tiny"
-                  type="success"
-                  secondary
-                  @click="handleAction(inst, 'START')"
-                >
-                  开机
-                </n-button>
-                <n-button
-                  v-if="inst.state === 'RUNNING'"
-                  size="tiny"
-                  type="warning"
-                  secondary
-                  @click="handleAction(inst, 'STOP')"
-                >
-                  关机
-                </n-button>
-                <n-button
-                  v-if="inst.state === 'RUNNING'"
-                  size="tiny"
-                  secondary
-                  @click="handleAction(inst, 'SOFTRESET')"
-                >
-                  重启
-                </n-button>
-
-                <!-- Change IP -->
-                <n-button size="tiny" secondary @click="handleRotateIP(inst)">
-                  刷IP
-                </n-button>
-
-                <!-- Attach IPv6 -->
-                <n-button v-if="!inst.ipv6" size="tiny" secondary @click="handleAttachIPv6(inst)">
-                  +IPv6
-                </n-button>
-
-                <!-- Resize -->
-                <n-button size="tiny" secondary @click="openResizeModal(inst)">
-                  改配
-                </n-button>
-
-                <!-- Edit Tags -->
-                <n-button size="tiny" secondary @click="openEditTagsModal(inst)">
-                  编辑标签
-                </n-button>
-
-                <!-- Copy SSH -->
-                <n-button size="tiny" type="info" secondary @click="copyText(inst.ssh_command)">
-                  SSH
-                </n-button>
-
-                <!-- Terminate -->
-                <n-button size="tiny" type="error" secondary @click="confirmTerminate(inst)">
-                  终止
-                </n-button>
+              <td class="whitespace-nowrap">
+                <div v-if="inst.root_password" class="flex items-center gap-2">
+                  <code class="mono rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{{ showPasswordMap[inst.ocid] ? inst.root_password : '••••••••••••' }}</code>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded text-ink-3 hover:bg-surface-2 hover:text-ink transition-colors"
+                    :aria-label="showPasswordMap[inst.ocid] ? '隐藏密码' : '显示密码'"
+                    @click="showPasswordMap[inst.ocid] = !showPasswordMap[inst.ocid]"
+                  >
+                    <n-icon size="16"><component :is="showPasswordMap[inst.ocid] ? EyeOffOutline : EyeOutline" /></n-icon>
+                  </button>
+                  <button type="button" class="txt-btn" @click="copyText(inst.root_password, 'Root 密码')">复制</button>
+                </div>
+                <div v-else class="text-xs text-ink-3">密钥登录 / 未设置</div>
+              </td>
+              <td class="text-right whitespace-nowrap">
+                <div class="inline-flex items-center gap-1.5">
+                  <n-button v-if="inst.state === 'STOPPED'" size="small" type="success" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'START')">开机</n-button>
+                  <n-button v-if="inst.state === 'RUNNING'" size="small" type="warning" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'STOP')">关机</n-button>
+                  <n-button size="small" secondary :disabled="!inst.ssh_command" @click="copyText(inst.ssh_command, 'SSH 命令')">SSH</n-button>
+                  <n-dropdown trigger="click" :options="moreOptions(inst)" placement="bottom-end" @select="(key: string) => onMore(key, inst)">
+                    <n-button size="small" secondary aria-label="更多操作">
+                      <template #icon><n-icon><EllipsisHorizontal /></n-icon></template>
+                    </n-button>
+                  </n-dropdown>
+                </div>
               </td>
             </tr>
           </tbody>
@@ -163,35 +106,42 @@
       </div>
     </div>
 
-    <!-- Resize Modal -->
-    <n-modal v-model:show="showResizeModal" preset="card" title="实例改配 (Resize)" style="max-width: 450px;">
-      <div v-if="selectedInst" class="space-y-4">
-        <p class="text-xs text-gray-500">将对实例 {{ selectedInst.display_name }} 执行改配（若处于运行中会自动停机后生效）</p>
+    <!-- Resize -->
+    <n-modal v-model:show="showResizeModal" preset="card" title="实例改配" style="max-width: 460px" :bordered="false">
+      <div v-if="selectedInst" class="space-y-5">
+        <p class="caption">对 <b class="text-ink">{{ selectedInst.display_name }}</b> 调整 OCPU 与内存。运行中的实例会先停机，改配完成后再启动。</p>
         <div>
-          <span class="text-xs font-medium block mb-1">目标 OCPU 核心数: {{ resizeOCPU }} 核</span>
-          <n-slider v-model:value="resizeOCPU" :min="1" :max="4" :step="1" />
+          <div class="mb-1.5 flex items-center justify-between">
+            <span class="label mb-0">OCPU</span>
+            <span class="mono text-sm font-semibold text-ink">{{ resizeOCPU }} 核</span>
+          </div>
+          <n-slider v-model:value="resizeOCPU" :min="1" :max="4" :step="1" :marks="{ 1: '1', 2: '2', 3: '3', 4: '4' }" />
         </div>
         <div>
-          <span class="text-xs font-medium block mb-1">目标内存: {{ resizeMemory }} GB</span>
-          <n-slider v-model:value="resizeMemory" :min="1" :max="24" :step="1" />
+          <div class="mb-1.5 flex items-center justify-between">
+            <span class="label mb-0">内存</span>
+            <span class="mono text-sm font-semibold text-ink">{{ resizeMemory }} GB</span>
+          </div>
+          <n-slider v-model:value="resizeMemory" :min="1" :max="24" :step="1" :marks="{ 6: '6', 12: '12', 18: '18', 24: '24' }" />
         </div>
-        <div class="flex justify-end space-x-2 pt-2">
+        <p v-if="resizeMemory !== resizeOCPU * 6" class="caption">免费额度下每 OCPU 建议搭配 6 GB 内存（{{ resizeOCPU }} 核对应 {{ resizeOCPU * 6 }} GB）。</p>
+        <div class="flex justify-end gap-2 pt-1">
           <n-button @click="showResizeModal = false">取消</n-button>
           <n-button type="primary" :loading="resizing" @click="submitResize">确认改配</n-button>
         </div>
       </div>
     </n-modal>
 
-    <!-- Edit Tags Modal -->
-    <n-modal v-model:show="showEditTagsModal" preset="card" title="修改实例云端标签 (Freeform Tags)" style="max-width: 450px;">
+    <!-- Tags -->
+    <n-modal v-model:show="showEditTagsModal" preset="card" title="编辑 Root 密码标签" style="max-width: 460px" :bordered="false">
       <div v-if="selectedInst" class="space-y-4">
-        <p class="text-xs text-gray-500">直接同步更新至 Oracle Cloud 云端实例自由标签，支持修改 Root 密码：</p>
-        <n-form-item label="root_password 标签">
-          <n-input v-model:value="editRootPass" placeholder="留空则删除该标签" />
+        <p class="caption">写入实例的云端自由标签 <code class="mono">root_password</code>。留空则删除该标签。这不会修改系统里的真实密码。</p>
+        <n-form-item label="root_password" label-placement="top" :show-feedback="false">
+          <n-input v-model:value="editRootPass" class="mono" placeholder="留空则删除" :input-props="{ autocomplete: 'off', spellcheck: 'false' }" />
         </n-form-item>
-        <div class="flex justify-end space-x-2 pt-2">
+        <div class="flex justify-end gap-2 pt-1">
           <n-button @click="showEditTagsModal = false">取消</n-button>
-          <n-button type="primary" :loading="updatingTags" @click="submitUpdateTags">同步保存到云端</n-button>
+          <n-button type="primary" :loading="updatingTags" @click="submitUpdateTags">保存到云端</n-button>
         </div>
       </div>
     </n-modal>
@@ -199,10 +149,26 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, h } from 'vue'
+import { NButton, NIcon, NModal, NSlider, NFormItem, NInput, NDropdown, NSkeleton, useMessage, useDialog } from 'naive-ui'
+import type { DropdownOption } from 'naive-ui'
+import {
+  RefreshOutline,
+  InformationCircleOutline,
+  EyeOutline,
+  EyeOffOutline,
+  EllipsisHorizontal,
+  SwapHorizontalOutline,
+  GlobeOutline,
+  HardwareChipOutline,
+  PricetagOutline,
+  TrashOutline,
+} from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
-import { useMessage, useDialog } from 'naive-ui'
+import PageHeader from '@/components/PageHeader.vue'
+import StatusPill from '@/components/StatusPill.vue'
+import EmptyState from '@/components/EmptyState.vue'
 
 const profileStore = useProfileStore()
 const message = useMessage()
@@ -211,6 +177,8 @@ const dialog = useDialog()
 const loading = ref(false)
 const instances = ref<any[]>([])
 const showPasswordMap = ref<{ [key: string]: boolean }>({})
+const acting = ref('')
+const probing = ref('')
 
 const showResizeModal = ref(false)
 const selectedInst = ref<any>(null)
@@ -222,19 +190,48 @@ const showEditTagsModal = ref(false)
 const editRootPass = ref('')
 const updatingTags = ref(false)
 
-const currentProfile = computed(() => {
-  return profileStore.profiles.find(p => p.id === profileStore.activeProfileId)
-})
+const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 
 const maskOCID = (ocid?: string) => {
   if (!ocid || ocid.length < 20) return ocid || ''
-  return ocid.substring(0, 10) + '...' + ocid.substring(ocid.length - 8)
+  return ocid.substring(0, 10) + '…' + ocid.substring(ocid.length - 8)
+}
+const shortAD = (ad?: string) => (ad ? ad.replace(/^[^:]+:/, '') : '')
+const formatDate = (t?: string) => {
+  if (!t) return ''
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? t : d.toLocaleDateString('zh-CN')
 }
 
-const copyText = (txt: string) => {
+const copyText = async (txt: string, what = '内容') => {
   if (!txt) return
-  navigator.clipboard.writeText(txt)
-  message.success('已复制到剪贴板')
+  try {
+    await navigator.clipboard.writeText(txt)
+    message.success(`${what}已复制`)
+  } catch {
+    message.error('复制失败，请手动选择复制')
+  }
+}
+
+const icon = (c: any) => () => h(NIcon, null, { default: () => h(c) })
+
+const moreOptions = (inst: any): DropdownOption[] => [
+  { label: '重启（软重启）', key: 'reboot', icon: icon(RefreshOutline), disabled: inst.state !== 'RUNNING' },
+  { label: '更换公网 IP', key: 'rotate', icon: icon(SwapHorizontalOutline) },
+  { label: '附加 IPv6', key: 'ipv6', icon: icon(GlobeOutline), disabled: !!inst.ipv6 },
+  { label: '改配 OCPU / 内存', key: 'resize', icon: icon(HardwareChipOutline) },
+  { label: '编辑 Root 密码标签', key: 'tags', icon: icon(PricetagOutline) },
+  { type: 'divider', key: 'd1' },
+  { label: '终止实例', key: 'terminate', icon: icon(TrashOutline), props: { style: 'color: var(--c-danger)' } },
+]
+
+const onMore = (key: string, inst: any) => {
+  if (key === 'reboot') handleAction(inst, 'SOFTRESET')
+  else if (key === 'rotate') handleRotateIP(inst)
+  else if (key === 'ipv6') handleAttachIPv6(inst)
+  else if (key === 'resize') openResizeModal(inst)
+  else if (key === 'tags') openEditTagsModal(inst)
+  else if (key === 'terminate') confirmTerminate(inst)
 }
 
 const fetchInstances = async () => {
@@ -251,69 +248,83 @@ const fetchInstances = async () => {
 }
 
 const handleAction = async (inst: any, action: string) => {
+  acting.value = inst.ocid
   try {
     await api.post('/instances/action', {
       profile_id: profileStore.activeProfileId,
       region: currentProfile.value?.region,
       ocid: inst.ocid,
-      action: action,
+      action,
     })
-    message.success(`操作 [${action}] 指令已下发`)
+    message.success(`已下发 ${action} 指令`)
     setTimeout(fetchInstances, 2000)
   } catch (e: any) {
     message.error(e.message)
+  } finally {
+    acting.value = ''
   }
 }
 
-const handleRotateIP = async (inst: any) => {
-  if (!confirm(`确定要为实例 ${inst.display_name} 更换新的公网 IP 吗？当前 IP 将被释放。`)) return
-  try {
-    message.loading('正在云端解绑旧 IP 并申请全新公网 IPv4...')
-    const res: any = await api.post('/instances/rotate-ip', {
-      profile_id: profileStore.activeProfileId,
-      region: currentProfile.value?.region,
-      ocid: inst.ocid,
-    })
-    message.success(`公网 IP 更换成功: ${res.new_ip}`)
-    await fetchInstances()
-  } catch (e: any) {
-    message.error(e.message)
-  }
+const handleRotateIP = (inst: any) => {
+  dialog.warning({
+    title: '更换公网 IP',
+    content: `将释放 ${inst.display_name} 当前的公网 IP ${inst.public_ip || ''}，并申请一个新的临时公网 IP。旧 IP 无法找回。`,
+    positiveText: '更换',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      const loadingMsg = message.loading('正在解绑旧 IP 并申请新 IP…', { duration: 0 })
+      try {
+        const res: any = await api.post('/instances/rotate-ip', {
+          profile_id: profileStore.activeProfileId,
+          region: currentProfile.value?.region,
+          ocid: inst.ocid,
+        })
+        message.success(`新公网 IP：${res.new_ip}`)
+        await fetchInstances()
+      } catch (e: any) {
+        message.error(e.message)
+      } finally {
+        loadingMsg.destroy()
+      }
+    },
+  })
 }
 
 const probeIP = async (ip: string) => {
+  probing.value = ip
   try {
     const res: any = await api.post('/instances/probe-ip', { ip, port: 22 })
-    if (res.reachable) {
-      message.success(`IP [${ip}:22] 连通测试通过！SSH 端口正常`)
-    } else {
-      message.warning(`IP [${ip}:22] 端口无响应，可能系统正在启动或内部防火墙未放通`)
-    }
+    if (res.reachable) message.success(`${ip}:22 可连通`)
+    else message.warning(`${ip}:22 无响应，系统可能还在启动，或防火墙未放行`)
   } catch (e: any) {
     message.error(e.message)
+  } finally {
+    probing.value = ''
   }
 }
 
 const handleAttachIPv6 = async (inst: any) => {
+  const loadingMsg = message.loading('正在分配 IPv6 地址…', { duration: 0 })
   try {
-    message.loading('正在为实例附加分配全新 IPv6 地址...')
     const res: any = await api.post('/instances/attach-ipv6', {
       profile_id: profileStore.activeProfileId,
       region: currentProfile.value?.region,
       ocid: inst.ocid,
     })
-    message.success(`IPv6 附加成功: ${res.ipv6}`)
+    message.success(`IPv6 已附加：${res.ipv6}`)
     await fetchInstances()
   } catch (e: any) {
     message.error(e.message)
+  } finally {
+    loadingMsg.destroy()
   }
 }
 
 const confirmTerminate = (inst: any) => {
-  dialog.warning({
-    title: '二次安全确认：终止（销毁）实例',
-    content: `您确定要彻底终止（删机）实例 [${inst.display_name}] 吗？引导卷及数据将被彻底销毁，该操作不可恢复！`,
-    positiveText: '确认终止',
+  dialog.error({
+    title: '终止并销毁实例',
+    content: `确定要终止 ${inst.display_name} 吗？实例连同引导卷和数据都会被删除，无法恢复。`,
+    positiveText: '终止实例',
     negativeText: '取消',
     onPositiveClick: async () => {
       try {
@@ -349,7 +360,7 @@ const submitResize = async () => {
       new_ocpu: resizeOCPU.value,
       new_memory: resizeMemory.value,
     })
-    message.success('改配指令已提交！')
+    message.success('改配指令已提交')
     showResizeModal.value = false
     setTimeout(fetchInstances, 3000)
   } catch (e: any) {
@@ -370,18 +381,15 @@ const submitUpdateTags = async () => {
   updatingTags.value = true
   try {
     const tags = { ...(selectedInst.value.freeform_tags || {}) }
-    if (editRootPass.value) {
-      tags['root_password'] = editRootPass.value
-    } else {
-      delete tags['root_password']
-    }
+    if (editRootPass.value) tags['root_password'] = editRootPass.value
+    else delete tags['root_password']
     await api.post('/instances/update-tags', {
       profile_id: profileStore.activeProfileId,
       region: currentProfile.value?.region,
       ocid: selectedInst.value.ocid,
-      tags: tags,
+      tags,
     })
-    message.success('云端自由标签已成功同步更新！')
+    message.success('云端标签已更新')
     showEditTagsModal.value = false
     await fetchInstances()
   } catch (e: any) {
@@ -391,9 +399,13 @@ const submitUpdateTags = async () => {
   }
 }
 
-watch(() => profileStore.activeProfileId, () => {
-  fetchInstances()
-})
+watch(
+  () => profileStore.activeProfileId,
+  () => {
+    instances.value = []
+    fetchInstances()
+  },
+)
 
 onMounted(() => {
   fetchInstances()

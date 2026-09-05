@@ -7,7 +7,7 @@ const router = createRouter({
       path: '/login',
       name: 'Login',
       component: () => import('./views/Login.vue'),
-      meta: { title: '安全登录与 2FA 验证' },
+      meta: { title: '登录' },
     },
     {
       path: '/',
@@ -19,43 +19,43 @@ const router = createRouter({
       path: '/launcher',
       name: 'Launcher',
       component: () => import('./views/Launcher.vue'),
-      meta: { title: '抢机开机控制台' },
+      meta: { title: '抢机任务' },
     },
     {
       path: '/instances',
       name: 'Instances',
       component: () => import('./views/Instances.vue'),
-      meta: { title: '实例与网络管理' },
+      meta: { title: '实例' },
     },
     {
       path: '/storage',
       name: 'Storage',
       component: () => import('./views/Storage.vue'),
-      meta: { title: '存储全生命周期管理' },
+      meta: { title: '存储' },
     },
     {
       path: '/firewall',
       name: 'Firewall',
       component: () => import('./views/Firewall.vue'),
-      meta: { title: '防火墙与安全列表' },
+      meta: { title: '防火墙' },
     },
     {
       path: '/profiles',
       name: 'Profiles',
       component: () => import('./views/Profiles.vue'),
-      meta: { title: '多 Profile 账号画像' },
+      meta: { title: '账号' },
     },
     {
       path: '/settings',
       name: 'Settings',
       component: () => import('./views/Settings.vue'),
-      meta: { title: '系统设置与审计' },
+      meta: { title: '设置' },
     },
   ],
 })
 
 router.beforeEach((to, _, next) => {
-  document.title = (to.meta.title ? to.meta.title + ' - ' : '') + 'OCI 免费额度控制台'
+  document.title = (to.meta.title ? to.meta.title + ' · ' : '') + 'OCI 控制台'
   next()
 })
 

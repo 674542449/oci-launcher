@@ -41,10 +41,8 @@ type BucketRequest struct {
 
 // ListBootVolumes lists boot volumes with VPU and grow commands
 func ListBootVolumes(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 
@@ -116,10 +114,8 @@ func CreateBootVolumeBackup(c *gin.Context) {
 
 // ListBlockVolumes lists block volumes
 func ListBlockVolumes(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 
@@ -162,10 +158,8 @@ func CreateBlockVolume(c *gin.Context) {
 
 // ListBuckets lists buckets
 func ListBuckets(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 

@@ -1,8 +1,11 @@
 package storage
 
 import (
+	"fmt"
 	"log"
 	"time"
+
+	"oci-panel/internal/config"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -61,69 +64,87 @@ func InitDB(dsn string) (*gorm.DB, error) {
 	return db, nil
 }
 
+// seedInitialPresets keeps the quick presets inside the configured Always Free allowance.
+// Presets are not user-editable, so stale seeds from older versions (4C/24G) are dropped and
+// the set is re-created whenever it is empty.
 func seedInitialPresets(db *gorm.DB) {
+	freeOCPU, freeMem, freeStorage := 2.0, 12.0, int64(200)
+	if cfg := config.GlobalConfig; cfg != nil {
+		if cfg.FreeA1OCPU > 0 {
+			freeOCPU = cfg.FreeA1OCPU
+		}
+		if cfg.FreeA1MemoryGB > 0 {
+			freeMem = cfg.FreeA1MemoryGB
+		}
+		if cfg.FreeStorageGB > 0 {
+			freeStorage = cfg.FreeStorageGB
+		}
+	}
+
+	// Remove presets that would fail the zero-cost guard
+	db.Where("shape LIKE ? AND (ocpu > ? OR memory_in_gbs > ?)", "%A1.Flex%", freeOCPU, freeMem).Delete(&Preset{})
+
 	var count int64
 	db.Model(&Preset{}).Count(&count)
-	if count == 0 {
-		initialPresets := []Preset{
-			{
-				Name:                "ARM 顶配主力单机 (4C / 24G / 100G)",
-				Shape:               "VM.Standard.A1.Flex",
-				OCPU:                4.0,
-				MemoryInGBs:         24.0,
-				BootVolumeSizeInGBs: 100,
-				BootVolumeVPU:       120,
-				LoginMode:           "root_key",
-				EnableIPv6:          true,
-			},
-			{
-				Name:                "ARM 双机平分方案 (2C / 12G / 50G)",
-				Shape:               "VM.Standard.A1.Flex",
-				OCPU:                2.0,
-				MemoryInGBs:         12.0,
-				BootVolumeSizeInGBs: 50,
-				BootVolumeVPU:       120,
-				LoginMode:           "root_key",
-				EnableIPv6:          true,
-			},
-			{
-				Name:                "ARM 四机矩阵方案 (1C / 6G / 50G)",
-				Shape:               "VM.Standard.A1.Flex",
-				OCPU:                1.0,
-				MemoryInGBs:         6.0,
-				BootVolumeSizeInGBs: 50,
-				BootVolumeVPU:       120,
-				LoginMode:           "root_key",
-				EnableIPv6:          true,
-			},
-			{
-				Name:                "AMD 永久免费微型机 (1C / 1G / 50G)",
-				Shape:               "VM.Standard.E2.1.Micro",
-				OCPU:                1.0,
-				MemoryInGBs:         1.0,
-				BootVolumeSizeInGBs: 50,
-				BootVolumeVPU:       120,
-				LoginMode:           "root_key",
-				EnableIPv6:          true,
-			},
-			{
-				Name:                "ARM 满配独享 (4C / 24G / 200G 占满全部免费额度)",
-				Shape:               "VM.Standard.A1.Flex",
-				OCPU:                4.0,
-				MemoryInGBs:         24.0,
-				BootVolumeSizeInGBs: 200,
-				BootVolumeVPU:       120,
-				LoginMode:           "root_key",
-				EnableIPv6:          true,
-			},
-		}
-		for _, p := range initialPresets {
-			db.Create(&p)
-		}
+	if count > 0 {
+		return
+	}
+
+	halfOCPU := freeOCPU / 2
+	halfMem := freeMem / 2
+	if halfOCPU < 1 {
+		halfOCPU, halfMem = freeOCPU, freeMem
+	}
+
+	presets := []Preset{
+		{
+			Name:                fmt.Sprintf("ARM 满额单机 (%.0fC / %.0fG / 100G)", freeOCPU, freeMem),
+			Shape:               "VM.Standard.A1.Flex",
+			OCPU:                freeOCPU,
+			MemoryInGBs:         freeMem,
+			BootVolumeSizeInGBs: 100,
+			BootVolumeVPU:       120,
+			LoginMode:           "root_key",
+			EnableIPv6:          true,
+		},
+		{
+			Name:                fmt.Sprintf("ARM 双机平分 (%.0fC / %.0fG / 50G)", halfOCPU, halfMem),
+			Shape:               "VM.Standard.A1.Flex",
+			OCPU:                halfOCPU,
+			MemoryInGBs:         halfMem,
+			BootVolumeSizeInGBs: 50,
+			BootVolumeVPU:       120,
+			LoginMode:           "root_key",
+			EnableIPv6:          true,
+		},
+		{
+			Name:                "AMD 微型机 (1C / 1G / 50G)",
+			Shape:               "VM.Standard.E2.1.Micro",
+			OCPU:                1.0,
+			MemoryInGBs:         1.0,
+			BootVolumeSizeInGBs: 50,
+			BootVolumeVPU:       120,
+			LoginMode:           "root_key",
+			EnableIPv6:          true,
+		},
+		{
+			Name:                fmt.Sprintf("ARM 满额独享 (%.0fC / %.0fG / %dG 占满存储额度)", freeOCPU, freeMem, freeStorage),
+			Shape:               "VM.Standard.A1.Flex",
+			OCPU:                freeOCPU,
+			MemoryInGBs:         freeMem,
+			BootVolumeSizeInGBs: freeStorage,
+			BootVolumeVPU:       120,
+			LoginMode:           "root_key",
+			EnableIPv6:          true,
+		},
+	}
+	for _, p := range presets {
+		preset := p
+		db.Create(&preset)
 	}
 }
 
-// LogAudit records immutable audit log
+// LogAudit records an immutable audit log entry
 func LogAudit(action, operator, clientIP, userAgent, details, status string) {
 	if DB == nil {
 		return

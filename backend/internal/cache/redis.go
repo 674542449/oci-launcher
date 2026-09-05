@@ -11,13 +11,16 @@ import (
 
 var RDB *redis.Client
 
+const accountLockKey = "oci:global_account_lock"
+
 func InitRedis(addr, password string) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     password,
-		DB:           0,
-		PoolSize:     50,
-		MinIdleConns: 10,
+		Addr:           addr,
+		Password:       password,
+		DB:             0,
+		PoolSize:       50,
+		MinIdleConns:   10,
+		MaxActiveConns: 200, // Pub/Sub sockets are not pooled; cap them so Redis maxclients is never exhausted
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -32,36 +35,46 @@ func InitRedis(addr, password string) (*redis.Client, error) {
 	return client, nil
 }
 
-// AcquireAccountLock locks account operations to guarantee single-account concurrency
-func AcquireAccountLock(ctx context.Context, profileID uint, ttl time.Duration) (bool, string, error) {
-	lockKey := "oci:global_account_lock"
-	val := fmt.Sprintf("%d", profileID)
+// acquireOrRefreshScript takes the global lock when it is free, and refreshes the TTL when it is
+// already held by the same profile. Returns 1 on success, 0 when another profile holds it.
+var acquireOrRefreshScript = redis.NewScript(`
+local cur = redis.call("GET", KEYS[1])
+if not cur or cur == ARGV[1] then
+  redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+  return 1
+end
+return 0
+`)
 
-	ok, err := RDB.SetNX(ctx, lockKey, val, ttl).Result()
+// releaseScript deletes the lock only if it is held by the given profile (compare-and-delete).
+var releaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
+
+// AcquireAccountLock enforces the "one OCI account operated at a time" rule.
+// It succeeds when the lock is free OR already held by the same profile (the TTL is refreshed in
+// that case), so a worker can renew its own lock every iteration. When another profile holds the
+// lock, ok=false and lockedBy carries that profile id.
+func AcquireAccountLock(ctx context.Context, profileID uint, ttl time.Duration) (ok bool, lockedBy string, err error) {
+	val := fmt.Sprintf("%d", profileID)
+	res, err := acquireOrRefreshScript.Run(ctx, RDB, []string{accountLockKey}, val, ttl.Milliseconds()).Int()
 	if err != nil {
 		return false, "", err
 	}
-	if !ok {
-		curVal, _ := RDB.Get(ctx, lockKey).Result()
-		return false, curVal, nil
+	if res == 1 {
+		return true, val, nil
 	}
-	return true, val, nil
+	cur, _ := RDB.Get(ctx, accountLockKey).Result()
+	return false, cur, nil
 }
 
-// ReleaseAccountLock releases the global account lock
+// ReleaseAccountLock releases the global lock if this profile holds it.
 func ReleaseAccountLock(ctx context.Context, profileID uint) error {
-	lockKey := "oci:global_account_lock"
-	curVal, err := RDB.Get(ctx, lockKey).Result()
-	if err == redis.Nil {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if curVal == fmt.Sprintf("%d", profileID) {
-		return RDB.Del(ctx, lockKey).Err()
-	}
-	return nil
+	val := fmt.Sprintf("%d", profileID)
+	return releaseScript.Run(ctx, RDB, []string{accountLockKey}, val).Err()
 }
 
 // IsIPBlacklisted checks if an IP is banned
@@ -86,7 +99,7 @@ func BlacklistIP(ctx context.Context, ip string, duration time.Duration, reason 
 	return RDB.Set(ctx, key, reason, duration).Err()
 }
 
-// RecordLoginFailure records login failure and returns lockout status and attempt count
+// RecordLoginFailure records a login failure and returns lockout status and attempt count
 func RecordLoginFailure(ctx context.Context, ip, username string) (isLocked bool, lockDuration time.Duration, attempts int64, err error) {
 	key := fmt.Sprintf("auth:fail:%s", ip)
 	pipe := RDB.Pipeline()
@@ -116,6 +129,18 @@ func RecordLoginFailure(ctx context.Context, ip, username string) (isLocked bool
 func ResetLoginFailures(ctx context.Context, ip string) {
 	key := fmt.Sprintf("auth:fail:%s", ip)
 	RDB.Del(ctx, key)
+}
+
+// RecordTOTPFailure counts wrong one-time codes per temp-token id. Returns the failure count.
+func RecordTOTPFailure(ctx context.Context, tokenJTI string) (int64, error) {
+	key := fmt.Sprintf("totp:fail:%s", tokenJTI)
+	pipe := RDB.Pipeline()
+	incr := pipe.Incr(ctx, key)
+	pipe.Expire(ctx, key, 10*time.Minute)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+	return incr.Val(), nil
 }
 
 // CheckAndSetTOTPUsed prevents TOTP replay attacks

@@ -1,106 +1,134 @@
 <template>
-  <div class="space-y-6 max-w-4xl mx-auto">
-    <!-- Header -->
-    <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm">
-      <h2 class="text-xl font-bold text-gray-900">系统设置与安全审计</h2>
-      <p class="text-xs text-gray-500">Telegram Bot 消息推送 · 密码与 2FA 修改 · 不可篡改安全审计日志</p>
-    </div>
+  <div class="mx-auto max-w-4xl">
+    <PageHeader title="设置" description="Telegram 通知、管理员密码与安全审计日志。" />
 
-    <!-- 1. Telegram Bot Configuration -->
-    <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-      <div class="flex justify-between items-center border-b border-gray-100 pb-3">
-        <div>
-          <h3 class="text-sm font-bold text-gray-900">Telegram Bot 消息通知配置</h3>
-          <p class="text-xs text-gray-500">开机成功、异常熔断、超额警报即时富文本推送到您的 Telegram</p>
+    <div class="space-y-4">
+      <!-- Telegram -->
+      <section class="card card-pad">
+        <div class="card-head mb-5">
+          <div>
+            <h2 class="section-title">Telegram 通知</h2>
+            <p class="caption">开机成功、任务熔断、超额告警会推送到这个聊天。</p>
+          </div>
         </div>
-        <n-button size="small" type="primary" secondary :loading="testingTG" @click="testTelegram">
-          📲 发送测试消息
-        </n-button>
-      </div>
+        <n-form label-placement="top" :show-feedback="false" @submit.prevent="saveTelegramSettings">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <n-form-item label="Bot Token">
+              <n-input
+                v-model:value="tgForm.token"
+                placeholder="从 @BotFather 获取，如 123456:ABC-DEF…"
+                class="mono"
+                :input-props="{ autocomplete: 'off', spellcheck: 'false' }"
+              />
+            </n-form-item>
+            <n-form-item label="Chat ID">
+              <n-input
+                v-model:value="tgForm.chatId"
+                placeholder="从 @userinfobot 获取的数字 ID"
+                class="mono"
+                :input-props="{ autocomplete: 'off', inputmode: 'numeric' }"
+              />
+            </n-form-item>
+          </div>
+          <p class="caption mt-1">已保存的 Token 会以掩码显示；重新粘贴完整 Token 即可覆盖。</p>
+          <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <n-button secondary :loading="testingTG" @click="testTelegram">
+              <template #icon><n-icon><SendOutline /></n-icon></template>
+              发送测试消息
+            </n-button>
+            <n-button type="primary" attr-type="submit" :loading="savingTG">保存</n-button>
+          </div>
+        </n-form>
+      </section>
 
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-        <n-form-item label="Telegram Bot Token">
-          <n-input v-model:value="tgForm.token" placeholder="从 @BotFather 获取的 Token (如 123456:ABC-DEF...)" />
-        </n-form-item>
-        <n-form-item label="Telegram Chat ID">
-          <n-input v-model:value="tgForm.chatId" placeholder="从 @userinfobot 获取的数字 ID (如 123456789)" />
-        </n-form-item>
-      </div>
-
-      <div class="flex justify-end">
-        <n-button type="primary" :loading="savingTG" @click="saveTelegramSettings">
-          保存 Telegram 配置
-        </n-button>
-      </div>
-    </div>
-
-    <!-- 2. Change Admin Password -->
-    <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-      <h3 class="text-sm font-bold text-gray-900 border-b border-gray-100 pb-3">修改管理员密码 (Argon2id / Bcrypt 强哈希)</h3>
-
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
-        <n-form-item label="当前旧密码">
-          <n-input v-model:value="pwdForm.oldPassword" type="password" show-password-on="click" placeholder="旧密码" />
-        </n-form-item>
-        <n-form-item label="设置新密码">
-          <n-input v-model:value="pwdForm.newPassword" type="password" show-password-on="click" placeholder="新密码 (至少8位)" />
-        </n-form-item>
-      </div>
-
-      <div class="flex justify-end">
-        <n-button type="primary" :loading="changingPwd" @click="handleChangePassword">
-          更新密码并吊销旧会话
-        </n-button>
-      </div>
-    </div>
-
-    <!-- 3. Immutable Security Audit Logs -->
-    <div class="bg-white p-6 rounded-2xl border border-gray-200 shadow-sm space-y-4">
-      <div class="flex justify-between items-center border-b border-gray-100 pb-3">
-        <div>
-          <h3 class="text-sm font-bold text-gray-900">不可篡改安全审计日志 (Append-Only)</h3>
-          <p class="text-xs text-gray-500">记录全站敏感操作流水（登录、改配、开机、删机、安全拦截）</p>
+      <!-- Password -->
+      <section class="card card-pad">
+        <div class="card-head mb-5">
+          <div>
+            <h2 class="section-title">修改管理员密码</h2>
+            <p class="caption">修改后所有已登录会话会被注销，需要重新登录。</p>
+          </div>
         </div>
-        <n-button size="small" @click="fetchAuditLogs">刷新审计日志</n-button>
-      </div>
+        <n-form label-placement="top" :show-feedback="false" @submit.prevent="handleChangePassword">
+          <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <n-form-item label="当前密码">
+              <n-input
+                v-model:value="pwdForm.oldPassword"
+                type="password"
+                show-password-on="click"
+                placeholder="当前密码"
+                :input-props="{ autocomplete: 'current-password' }"
+              />
+            </n-form-item>
+            <n-form-item label="新密码">
+              <n-input
+                v-model:value="pwdForm.newPassword"
+                type="password"
+                show-password-on="click"
+                placeholder="至少 8 位"
+                :input-props="{ autocomplete: 'new-password' }"
+              />
+            </n-form-item>
+          </div>
+          <div class="mt-4 flex justify-end">
+            <n-button type="primary" attr-type="submit" :loading="changingPwd">更新密码</n-button>
+          </div>
+        </n-form>
+      </section>
 
-      <div class="overflow-x-auto max-h-96">
-        <table class="min-w-full divide-y divide-gray-200 text-left text-xs">
-          <thead class="bg-gray-50 text-gray-500 sticky top-0">
-            <tr>
-              <th class="px-4 py-2.5">时间</th>
-              <th class="px-4 py-2.5">操作行为</th>
-              <th class="px-4 py-2.5">操作人</th>
-              <th class="px-4 py-2.5">客户端 IP</th>
-              <th class="px-4 py-2.5">详细说明</th>
-              <th class="px-4 py-2.5">状态</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100 text-gray-700 font-mono">
-            <tr v-for="log in auditLogs" :key="log.id" class="hover:bg-gray-50">
-              <td class="px-4 py-2 text-gray-400 whitespace-nowrap">{{ formatTime(log.created_at) }}</td>
-              <td class="px-4 py-2 font-bold">{{ log.action }}</td>
-              <td class="px-4 py-2">{{ log.operator }}</td>
-              <td class="px-4 py-2">{{ log.client_ip }}</td>
-              <td class="px-4 py-2 font-sans max-w-xs truncate" :title="log.details">{{ log.details }}</td>
-              <td class="px-4 py-2">
-                <span class="px-2 py-0.5 rounded text-[10px]" :class="log.status === 'SUCCESS' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'">
-                  {{ log.status }}
-                </span>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <!-- Audit log -->
+      <section class="card overflow-hidden">
+        <div class="card-head card-pad pb-4">
+          <div>
+            <h2 class="section-title">安全审计日志</h2>
+            <p class="caption">只追加、不可修改。记录登录、配置变更、开机与删机等敏感操作，最近 200 条。</p>
+          </div>
+          <n-button size="small" secondary :loading="loadingLogs" @click="fetchAuditLogs">
+            <template #icon><n-icon><RefreshOutline /></n-icon></template>
+            刷新
+          </n-button>
+        </div>
+
+        <EmptyState v-if="!loadingLogs && auditLogs.length === 0" title="还没有审计记录" />
+        <div v-else class="tbl-wrap max-h-[480px] overflow-y-auto border-t border-line">
+          <table class="tbl">
+            <thead class="sticky top-0 z-10">
+              <tr>
+                <th>时间</th>
+                <th>操作</th>
+                <th>操作者</th>
+                <th>客户端 IP</th>
+                <th>详情</th>
+                <th>结果</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="log in auditLogs" :key="log.id">
+                <td class="mono whitespace-nowrap text-ink-3">{{ formatTime(log.created_at) }}</td>
+                <td><code class="mono rounded bg-surface-2 px-1.5 py-0.5 text-xs text-ink">{{ log.action }}</code></td>
+                <td class="whitespace-nowrap">{{ log.operator }}</td>
+                <td class="mono whitespace-nowrap text-ink-2">{{ log.client_ip }}</td>
+                <td class="max-w-[360px] truncate text-ink-2" :title="log.details">{{ log.details }}</td>
+                <td>
+                  <span class="pill" :class="log.status === 'SUCCESS' ? 'pill-ok' : 'pill-danger'">{{ log.status === 'SUCCESS' ? '成功' : log.status }}</span>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
-import { api } from '@/api/client'
-import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
+import { NForm, NFormItem, NInput, NButton, NIcon, useMessage } from 'naive-ui'
+import { SendOutline, RefreshOutline } from '@vicons/ionicons5'
+import { api } from '@/api/client'
+import PageHeader from '@/components/PageHeader.vue'
+import EmptyState from '@/components/EmptyState.vue'
 
 const message = useMessage()
 const router = useRouter()
@@ -113,6 +141,7 @@ const pwdForm = ref({ oldPassword: '', newPassword: '' })
 const changingPwd = ref(false)
 
 const auditLogs = ref<any[]>([])
+const loadingLogs = ref(false)
 
 const formatTime = (t: string) => {
   if (!t) return ''
@@ -126,15 +155,33 @@ const loadSettings = async () => {
       tgForm.value.token = res.settings.tg_bot_token || ''
       tgForm.value.chatId = res.settings.tg_chat_id || ''
     }
-  } catch (e) {}
+  } catch (e) {
+    /* settings are optional */
+  }
+}
+
+// A masked token (from GET /settings) must not be written back over the real one.
+const isMaskedToken = (t: string) => t.includes('********')
+
+const persistTelegram = async () => {
+  if (tgForm.value.token && !isMaskedToken(tgForm.value.token)) {
+    await api.post('/settings/save', { key: 'tg_bot_token', value: tgForm.value.token })
+  }
+  if (tgForm.value.chatId) {
+    await api.post('/settings/save', { key: 'tg_chat_id', value: tgForm.value.chatId })
+  }
 }
 
 const saveTelegramSettings = async () => {
+  if (!tgForm.value.token || !tgForm.value.chatId) {
+    message.warning('请填写 Bot Token 和 Chat ID')
+    return
+  }
   savingTG.value = true
   try {
-    await api.post('/settings/save', { key: 'tg_bot_token', value: tgForm.value.token })
-    await api.post('/settings/save', { key: 'tg_chat_id', value: tgForm.value.chatId })
-    message.success('Telegram Bot 配置已安全保存')
+    await persistTelegram()
+    message.success('Telegram 配置已保存')
+    await loadSettings()
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -144,31 +191,17 @@ const saveTelegramSettings = async () => {
 
 const testTelegram = async () => {
   if (!tgForm.value.token || !tgForm.value.chatId) {
-    message.warning('请先填写完整的 Bot Token 和 Chat ID')
+    message.warning('请先填写 Bot Token 和 Chat ID')
     return
   }
   testingTG.value = true
   try {
-    await api.post('/settings/save', { key: 'tg_bot_token', value: tgForm.value.token })
-    await api.post('/settings/save', { key: 'tg_chat_id', value: tgForm.value.chatId })
-    // Directly trigger test via telegram send API
-    const url = `https://api.telegram.org/bot${tgForm.value.token}/sendMessage`
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: tgForm.value.chatId,
-        text: '🔔 <b>【OCI 控制台测试推送】</b>\n这是一条连通性测试消息，您的 Telegram 通知配置完全正常！',
-        parse_mode: 'HTML',
-      }),
-    })
-    if (resp.ok) {
-      message.success('测试推送成功！请查看您的 Telegram 聊天窗口')
-    } else {
-      message.error(`Telegram API 报错，状态码: ${resp.status}`)
-    }
+    await persistTelegram()
+    // Sent by the backend: the browser CSP blocks direct calls to api.telegram.org.
+    const res: any = await api.post('/settings/test-telegram')
+    message.success(res.message || '测试消息已发送，请查看 Telegram')
   } catch (e: any) {
-    message.error('发送测试消息失败: ' + e.message)
+    message.error('发送失败：' + e.message)
   } finally {
     testingTG.value = false
   }
@@ -176,7 +209,11 @@ const testTelegram = async () => {
 
 const handleChangePassword = async () => {
   if (!pwdForm.value.oldPassword || !pwdForm.value.newPassword) {
-    message.warning('请填写旧密码与新密码')
+    message.warning('请填写当前密码与新密码')
+    return
+  }
+  if (pwdForm.value.newPassword.length < 8) {
+    message.warning('新密码至少 8 位')
     return
   }
   changingPwd.value = true
@@ -185,10 +222,8 @@ const handleChangePassword = async () => {
       old_password: pwdForm.value.oldPassword,
       new_password: pwdForm.value.newPassword,
     })
-    message.success('密码已成功修改！旧会话已被吊销，请重新登录')
-    setTimeout(() => {
-      router.push('/login')
-    }, 1500)
+    message.success('密码已更新，请重新登录')
+    setTimeout(() => router.push('/login'), 1200)
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -197,10 +232,15 @@ const handleChangePassword = async () => {
 }
 
 const fetchAuditLogs = async () => {
+  loadingLogs.value = true
   try {
     const res: any = await api.get('/audit-logs')
     auditLogs.value = res.logs || []
-  } catch (e) {}
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    loadingLogs.value = false
+  }
 }
 
 onMounted(() => {

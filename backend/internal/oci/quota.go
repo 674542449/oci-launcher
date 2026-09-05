@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"oci-panel/internal/cache"
+	"oci-panel/internal/config"
 	"oci-panel/internal/storage"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
@@ -15,8 +17,12 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/limits"
 )
 
+// Documented PAYG default for standard-a1-core-count (Service Limits reference). Always Free
+// tenancies get a small fixed cap instead, so anything above this clearly indicates an upgraded account.
+const paygA1CoreLimitHint = 4
+
 type AccountTypeInfo struct {
-	DetectedType    string `json:"detected_type"`    // FREE_TIER, PAYG, PROMOTION
+	DetectedType    string `json:"detected_type"`    // FREE_TIER, PAYG, UNKNOWN
 	EffectiveType   string `json:"effective_type"`   // free or payg (after override)
 	DetectionReason string `json:"detection_reason"` // Transparent proof
 	A1CoreLimit     int64  `json:"a1_core_limit"`
@@ -34,7 +40,7 @@ type QuotaSummary struct {
 	AvailableA1Memory float64         `json:"available_a1_memory_gb"`
 	MicroCount        int             `json:"micro_count"`
 	MaxMicroCount     int             `json:"max_micro_count"`
-	TotalStorageGB    int64           `json:"total_storage_gb"` // Always 200 GB
+	TotalStorageGB    int64           `json:"total_storage_gb"`
 	UsedStorageGB     int64           `json:"used_storage_gb"`
 	AvailableStorage  int64           `json:"available_storage_gb"`
 	OutboundTrafficTB float64         `json:"outbound_traffic_tb"` // Max 10 TB
@@ -42,51 +48,147 @@ type QuotaSummary struct {
 	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
-// DetectAccountType executes account type detection via Limits API
-func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*AccountTypeInfo, error) {
-	info := &AccountTypeInfo{
-		DetectedType: "FREE_TIER",
+// freeAllowance returns the configured Always Free allowances (see config.Config).
+func freeAllowance() (ocpu, memGB float64, storageGB int64, micro int) {
+	ocpu, memGB, storageGB, micro = 2, 12, 200, 2
+	if cfg := config.GlobalConfig; cfg != nil {
+		if cfg.FreeA1OCPU > 0 {
+			ocpu = cfg.FreeA1OCPU
+		}
+		if cfg.FreeA1MemoryGB > 0 {
+			memGB = cfg.FreeA1MemoryGB
+		}
+		if cfg.FreeStorageGB > 0 {
+			storageGB = cfg.FreeStorageGB
+		}
+		if cfg.FreeMicroCount > 0 {
+			micro = cfg.FreeMicroCount
+		}
+	}
+	return
+}
+
+// ResolveHomeRegion returns the tenancy's home region *name* (e.g. "ap-tokyo-1").
+// GetTenancy only exposes the 3-letter key ("NRT"), which must not be compared with region names.
+func ResolveHomeRegion(ctx context.Context, profile *storage.OCIProfile) (string, error) {
+	cacheKey := "homeregion:" + profile.TenancyOCID
+	if cached, err := cache.GetCachedMetadata(ctx, cacheKey); err == nil && cached != "" {
+		return cached, nil
 	}
 
-	// 1. Read standard-a1-core-count and memory from Limits API
-	limitsClient, err := GetLimitsClient(profile)
+	idClient, err := GetIdentityClient(profile)
+	if err != nil {
+		return "", err
+	}
+
+	homeRegion := ""
+	subs, err := idClient.ListRegionSubscriptions(ctx, identity.ListRegionSubscriptionsRequest{
+		TenancyId: common.String(profile.TenancyOCID),
+	})
 	if err == nil {
-		req := limits.ListLimitValuesRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-			ServiceName:   common.String("compute"),
-		}
-		resp, err2 := limitsClient.ListLimitValues(ctx, req)
-		if err2 == nil {
-			for _, item := range resp.Items {
-				name := StrVal(item.Name)
-				if name == "standard-a1-core-count" && item.Value != nil {
-					info.A1CoreLimit = *item.Value
-				}
-				if name == "standard-a1-memory-count" && item.Value != nil {
-					info.A1MemoryLimit = *item.Value
-				}
+		for _, s := range subs.Items {
+			if BoolVal(s.IsHomeRegion) && s.RegionName != nil {
+				homeRegion = *s.RegionName
+				break
 			}
 		}
 	}
 
-	// Determine type based on A1 compute limits
-	if info.A1CoreLimit >= 4 {
-		info.DetectedType = "PAYG"
-		info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (>= 4 判定为已升级 PAYG)", info.A1CoreLimit)
-	} else {
-		info.DetectedType = "FREE_TIER"
-		info.DetectionReason = fmt.Sprintf("服务限额探测: standard-a1-core-count = %d (<= 2 判定为未升级免费号)", info.A1CoreLimit)
+	if homeRegion == "" {
+		// Fallback: map the region key through the SDK's table
+		tenancyResp, err2 := idClient.GetTenancy(ctx, identity.GetTenancyRequest{
+			TenancyId: common.String(profile.TenancyOCID),
+		})
+		if err2 != nil {
+			if err != nil {
+				return "", fmt.Errorf("failed to resolve home region: %w", err)
+			}
+			return "", fmt.Errorf("failed to resolve home region: %w", err2)
+		}
+		if tenancyResp.HomeRegionKey != nil {
+			homeRegion = string(common.StringToRegion(*tenancyResp.HomeRegionKey))
+		}
 	}
 
-	// Determine effective type based on manual override
-	override := strings.ToLower(profile.AccountTypeOverride)
-	if override == "payg" {
-		info.EffectiveType = "payg"
-		info.DetectionReason += " [用户已手动覆盖为: PAYG]"
-	} else if override == "free" {
-		info.EffectiveType = "free"
-		info.DetectionReason += " [用户已手动覆盖为: FREE_TIER]"
+	if homeRegion == "" {
+		return "", fmt.Errorf("tenancy has no home region subscription")
+	}
+
+	_ = cache.CacheMetadata(ctx, cacheKey, homeRegion, 24*time.Hour)
+	return homeRegion, nil
+}
+
+// fetchA1Limits reads the tenancy's standard-a1-core-count / standard-a1-memory-count limits in
+// the given region. Limits are AD-scoped, so the maximum across ADs is returned.
+func fetchA1Limits(ctx context.Context, profile *storage.OCIProfile, region string) (coreLimit, memLimit int64, err error) {
+	limitsClient, err := GetLimitsClient(profile, region)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	maxFor := func(name string) (int64, error) {
+		req := limits.ListLimitValuesRequest{
+			CompartmentId: common.String(profile.TenancyOCID),
+			ServiceName:   common.String("compute"),
+			Name:          common.String(name),
+			Limit:         common.Int(100),
+		}
+		var best int64
+		for {
+			resp, err := limitsClient.ListLimitValues(ctx, req)
+			if err != nil {
+				return 0, err
+			}
+			for _, item := range resp.Items {
+				if item.Value != nil && *item.Value > best {
+					best = *item.Value
+				}
+			}
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
+		}
+		return best, nil
+	}
+
+	if coreLimit, err = maxFor("standard-a1-core-count"); err != nil {
+		return 0, 0, err
+	}
+	if memLimit, err = maxFor("standard-a1-memory-count"); err != nil {
+		return coreLimit, 0, err
+	}
+	return coreLimit, memLimit, nil
+}
+
+// DetectAccountType classifies the tenancy from its A1 service limits (queried in the home region).
+func DetectAccountType(ctx context.Context, profile *storage.OCIProfile, homeRegion string) (*AccountTypeInfo, error) {
+	info := &AccountTypeInfo{DetectedType: "UNKNOWN"}
+
+	coreLimit, memLimit, err := fetchA1Limits(ctx, profile, homeRegion)
+	if err != nil {
+		info.DetectionReason = fmt.Sprintf("服务限额查询失败，无法自动判定: %v", err)
 	} else {
+		info.A1CoreLimit = coreLimit
+		info.A1MemoryLimit = memLimit
+		if coreLimit > paygA1CoreLimitHint {
+			info.DetectedType = "PAYG"
+			info.DetectionReason = fmt.Sprintf("服务限额 standard-a1-core-count = %d（大于 %d，判定为已升级 PAYG）", coreLimit, paygA1CoreLimitHint)
+		} else {
+			info.DetectedType = "FREE_TIER"
+			info.DetectionReason = fmt.Sprintf("服务限额 standard-a1-core-count = %d（不超过 %d，判定为 Always Free）", coreLimit, paygA1CoreLimitHint)
+		}
+	}
+
+	override := strings.ToLower(profile.AccountTypeOverride)
+	switch override {
+	case "payg":
+		info.EffectiveType = "payg"
+		info.DetectionReason += " [已手动覆盖为 PAYG]"
+	case "free":
+		info.EffectiveType = "free"
+		info.DetectionReason += " [已手动覆盖为 Always Free]"
+	default:
 		if info.DetectedType == "PAYG" {
 			info.EffectiveType = "payg"
 		} else {
@@ -97,24 +199,33 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*Accou
 	return info, nil
 }
 
-// GetLiveQuotaSummary gathers all live usage concurrently via Goroutines (Scatter-Gather)
+// GetLiveQuotaSummary gathers live usage in the home region (instances + boot/block volumes).
 func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*QuotaSummary, error) {
+	freeOCPU, freeMem, freeStorage, freeMicro := freeAllowance()
+
 	summary := &QuotaSummary{
-		TotalStorageGB: 200,
-		MaxMicroCount:  2,
-		UpdatedAt:      time.Now(),
+		TotalFreeOCPU:     freeOCPU,
+		TotalFreeMemoryGB: freeMem,
+		TotalStorageGB:    freeStorage,
+		MaxMicroCount:     freeMicro,
+		UpdatedAt:         time.Now(),
 	}
 
-	// 1. Detect account type
-	typeInfo, err := DetectAccountType(ctx, profile)
+	// 1. Home region (Always Free resources only exist there)
+	homeRegion, err := ResolveHomeRegion(ctx, profile)
+	if err != nil {
+		return nil, err
+	}
+	summary.HomeRegion = homeRegion
+
+	// 2. Account type from service limits
+	typeInfo, err := DetectAccountType(ctx, profile, homeRegion)
 	if err != nil {
 		return nil, err
 	}
 	summary.AccountType = *typeInfo
 
-	// Map free tier quota: Always Free baseline is 4 OCPU and 24 GB RAM
-	summary.TotalFreeOCPU = 4.0
-	summary.TotalFreeMemoryGB = 24.0
+	// A tenancy cap below the documented allowance wins; a higher cap never raises the free line.
 	if typeInfo.A1CoreLimit > 0 && float64(typeInfo.A1CoreLimit) < summary.TotalFreeOCPU {
 		summary.TotalFreeOCPU = float64(typeInfo.A1CoreLimit)
 	}
@@ -122,132 +233,125 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 		summary.TotalFreeMemoryGB = float64(typeInfo.A1MemoryLimit)
 	}
 
-	// 2. Fetch Home Region and Availability Domains
-	var adNames []string
-	idClient, err := GetIdentityClient(profile)
-	if err == nil {
-		tenancyResp, err2 := idClient.GetTenancy(ctx, identity.GetTenancyRequest{
-			TenancyId: common.String(profile.TenancyOCID),
-		})
-		if err2 == nil && tenancyResp.HomeRegionKey != nil {
-			summary.HomeRegion = *tenancyResp.HomeRegionKey
-		}
-		adResp, err3 := idClient.ListAvailabilityDomains(ctx, identity.ListAvailabilityDomainsRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-		})
-		if err3 == nil {
-			for _, ad := range adResp.Items {
-				if ad.Name != nil {
-					adNames = append(adNames, *ad.Name)
-				}
-			}
-		}
-	}
-	if summary.HomeRegion == "" {
-		summary.HomeRegion = profile.Region
+	// 3. Availability domains of the home region (AD names are region specific)
+	adNames, err := ListAvailabilityDomainNames(ctx, profile, homeRegion)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list availability domains in %s: %w", homeRegion, err)
 	}
 
-	// 3. Concurrent Scatter-Gather: Instances + Storage
-	computeClient, err := GetComputeClient(profile, summary.HomeRegion)
+	computeClient, err := GetComputeClient(profile, homeRegion)
 	if err != nil {
 		return nil, err
 	}
-
-	blockClient, err := GetBlockstorageClient(profile, summary.HomeRegion)
+	blockClient, err := GetBlockstorageClient(profile, homeRegion)
 	if err != nil {
 		return nil, err
 	}
 
 	var wg sync.WaitGroup
+	var mu sync.Mutex
 	var usedA1OCPU, usedA1Mem float64
 	var microCount int
 	var usedStorageGB int64
-	var queryErr error
-	var mu sync.Mutex
+	var errs []error
+	fail := func(err error) {
+		mu.Lock()
+		errs = append(errs, err)
+		mu.Unlock()
+	}
 
-	// Query Instances
+	// Instances
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		req := core.ListInstancesRequest{
 			CompartmentId: common.String(profile.TenancyOCID),
+			Limit:         common.Int(100),
 		}
-		resp, err := computeClient.ListInstances(ctx, req)
-		if err != nil {
-			mu.Lock()
-			queryErr = err
-			mu.Unlock()
-			return
-		}
-
 		var localOCPU, localMem float64
 		var localMicro int
-
-		for _, inst := range resp.Items {
-			// Skip terminated instances
-			if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
-				continue
+		for {
+			resp, err := computeClient.ListInstances(ctx, req)
+			if err != nil {
+				fail(fmt.Errorf("list instances: %w", err))
+				return
 			}
-
-			shape := StrVal(inst.Shape)
-			if strings.Contains(shape, "A1.Flex") {
-				if inst.ShapeConfig != nil {
-					if inst.ShapeConfig.Ocpus != nil {
-						localOCPU += float64(*inst.ShapeConfig.Ocpus)
-					}
-					if inst.ShapeConfig.MemoryInGBs != nil {
-						localMem += float64(*inst.ShapeConfig.MemoryInGBs)
-					}
+			for _, inst := range resp.Items {
+				if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
+					continue
 				}
-			} else if strings.Contains(shape, "E2.1.Micro") {
-				localMicro++
+				shape := StrVal(inst.Shape)
+				if strings.Contains(shape, "A1.Flex") {
+					if inst.ShapeConfig != nil {
+						if inst.ShapeConfig.Ocpus != nil {
+							localOCPU += float64(*inst.ShapeConfig.Ocpus)
+						}
+						if inst.ShapeConfig.MemoryInGBs != nil {
+							localMem += float64(*inst.ShapeConfig.MemoryInGBs)
+						}
+					}
+				} else if strings.Contains(shape, "E2.1.Micro") {
+					localMicro++
+				}
 			}
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
 		}
-
 		mu.Lock()
-		usedA1OCPU = localOCPU
-		usedA1Mem = localMem
-		microCount = localMicro
+		usedA1OCPU, usedA1Mem, microCount = localOCPU, localMem, localMicro
 		mu.Unlock()
 	}()
 
-	// Query Boot Volumes and Block Volumes for storage summation
+	// Boot volumes (per AD) + block volumes
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		var localStorage int64
-
-		// 1. Boot volumes (must query by Availability Domain as required by OCI API)
 		for _, ad := range adNames {
 			bvReq := core.ListBootVolumesRequest{
 				AvailabilityDomain: common.String(ad),
 				CompartmentId:      common.String(profile.TenancyOCID),
+				Limit:              common.Int(100),
 			}
-			bvResp, err := blockClient.ListBootVolumes(ctx, bvReq)
-			if err == nil {
+			for {
+				bvResp, err := blockClient.ListBootVolumes(ctx, bvReq)
+				if err != nil {
+					fail(fmt.Errorf("list boot volumes in %s: %w", ad, err))
+					return
+				}
 				for _, bv := range bvResp.Items {
 					if bv.LifecycleState != core.BootVolumeLifecycleStateTerminated && bv.LifecycleState != core.BootVolumeLifecycleStateTerminating {
-						if bv.SizeInGBs != nil {
-							localStorage += *bv.SizeInGBs
-						}
+						localStorage += Int64Val(bv.SizeInGBs)
 					}
 				}
+				if bvResp.OpcNextPage == nil {
+					break
+				}
+				bvReq.Page = bvResp.OpcNextPage
 			}
 		}
 
-		// 2. Block volumes
 		volReq := core.ListVolumesRequest{
 			CompartmentId: common.String(profile.TenancyOCID),
+			Limit:         common.Int(100),
 		}
-		volResp, err := blockClient.ListVolumes(ctx, volReq)
-		if err == nil {
+		for {
+			volResp, err := blockClient.ListVolumes(ctx, volReq)
+			if err != nil {
+				fail(fmt.Errorf("list block volumes: %w", err))
+				return
+			}
 			for _, vol := range volResp.Items {
 				if vol.LifecycleState != core.VolumeLifecycleStateTerminated && vol.LifecycleState != core.VolumeLifecycleStateTerminating {
-					if vol.SizeInGBs != nil {
-						localStorage += *vol.SizeInGBs
-					}
+					localStorage += Int64Val(vol.SizeInGBs)
 				}
 			}
+			if volResp.OpcNextPage == nil {
+				break
+			}
+			volReq.Page = volResp.OpcNextPage
 		}
 
 		mu.Lock()
@@ -257,8 +361,9 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 
 	wg.Wait()
 
-	if queryErr != nil {
-		return nil, queryErr
+	if len(errs) > 0 {
+		// Fail closed: an incomplete picture must not pass the zero-cost guard.
+		return nil, errs[0]
 	}
 
 	summary.UsedA1OCPU = usedA1OCPU
@@ -266,71 +371,61 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 	summary.MicroCount = microCount
 	summary.UsedStorageGB = usedStorageGB
 
-	summary.AvailableA1OCPU = summary.TotalFreeOCPU - summary.UsedA1OCPU
-	if summary.AvailableA1OCPU < 0 {
-		summary.AvailableA1OCPU = 0
-	}
-	summary.AvailableA1Memory = summary.TotalFreeMemoryGB - summary.UsedA1MemoryGB
-	if summary.AvailableA1Memory < 0 {
-		summary.AvailableA1Memory = 0
-	}
+	summary.AvailableA1OCPU = maxFloat(0, summary.TotalFreeOCPU-summary.UsedA1OCPU)
+	summary.AvailableA1Memory = maxFloat(0, summary.TotalFreeMemoryGB-summary.UsedA1MemoryGB)
 	summary.AvailableStorage = summary.TotalStorageGB - summary.UsedStorageGB
 	if summary.AvailableStorage < 0 {
 		summary.AvailableStorage = 0
 	}
 
-	// Calculate PAYG estimated monthly fee if usage exceeds free threshold
-	if summary.UsedA1OCPU > summary.TotalFreeOCPU || summary.UsedA1MemoryGB > summary.TotalFreeMemoryGB {
-		extraOCPU := summary.UsedA1OCPU - summary.TotalFreeOCPU
-		if extraOCPU < 0 {
-			extraOCPU = 0
-		}
-		extraMem := summary.UsedA1MemoryGB - summary.TotalFreeMemoryGB
-		if extraMem < 0 {
-			extraMem = 0
-		}
-		// $0.01/OCPU-hour + $0.0015/GB-hour across 730 hours
+	// PAYG estimate for usage above the free line: $0.01/OCPU-hour + $0.0015/GB-hour, 730 h/month
+	extraOCPU := maxFloat(0, summary.UsedA1OCPU-summary.TotalFreeOCPU)
+	extraMem := maxFloat(0, summary.UsedA1MemoryGB-summary.TotalFreeMemoryGB)
+	if extraOCPU > 0 || extraMem > 0 {
 		summary.EstimatedMonthly = (extraOCPU*0.01 + extraMem*0.0015) * 730.0
 	}
 
 	return summary, nil
 }
 
-// ValidateFreeTierConstraint enforces strict zero-cost boundary before creating an instance task
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// ValidateFreeTierConstraint enforces the zero-cost boundary before a launch task is created or resumed.
 func ValidateFreeTierConstraint(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask) error {
 	summary, err := GetLiveQuotaSummary(ctx, profile)
 	if err != nil {
 		return fmt.Errorf("无法获取账号当前配额: %w", err)
 	}
 
-	// 1. Home Region Rule: Free tier only valid in Home Region
-	if summary.HomeRegion != "" && !strings.EqualFold(task.Region, summary.HomeRegion) && !strings.Contains(strings.ToLower(task.Region), strings.ToLower(summary.HomeRegion)) {
-		return fmt.Errorf("【零费用硬阻断】目标区域 [%s] 与该账号的主区域 (Home Region: [%s]) 不一致！跨区创建将失去免费资格并产生扣费，系统已严格阻断", task.Region, summary.HomeRegion)
+	// 1. Always Free resources only exist in the home region
+	if summary.HomeRegion != "" && !strings.EqualFold(strings.TrimSpace(task.Region), summary.HomeRegion) {
+		return fmt.Errorf("【零费用硬阻断】目标区域 [%s] 与该账号的主区域 [%s] 不一致。免费资源只能在主区域创建，跨区创建会产生扣费", task.Region, summary.HomeRegion)
 	}
 
-	// 2. Storage Rule: Total storage <= 200 GB
-	if summary.UsedStorageGB+task.BootVolumeSizeInGBs > 200 {
-		return fmt.Errorf("【存储超额硬阻断】申请引导卷 %d GB + 当前已用存储 %d GB = %d GB，超过了 200 GB 免费存储总限额！请调整引导卷大小",
-			task.BootVolumeSizeInGBs, summary.UsedStorageGB, summary.UsedStorageGB+task.BootVolumeSizeInGBs)
+	// 2. Boot + block storage total
+	if summary.UsedStorageGB+task.BootVolumeSizeInGBs > summary.TotalStorageGB {
+		return fmt.Errorf("【存储超额硬阻断】申请引导卷 %d GB + 当前已用 %d GB = %d GB，超过 %d GB 免费存储总额，请调小引导卷",
+			task.BootVolumeSizeInGBs, summary.UsedStorageGB, summary.UsedStorageGB+task.BootVolumeSizeInGBs, summary.TotalStorageGB)
 	}
 
-	// 3. Compute Rule
+	// 3. Compute
 	if strings.Contains(task.Shape, "A1.Flex") {
-		maxOCPU := summary.TotalFreeOCPU
-		maxMem := summary.TotalFreeMemoryGB
-
-		if summary.UsedA1OCPU+task.OCPU > maxOCPU {
-			return fmt.Errorf("【CPU额度硬阻断】申请 %0.1f OCPU + 当前已用 %0.1f OCPU = %0.1f OCPU，已超出当前账号免费额度 (%0.1f OCPU)",
-				task.OCPU, summary.UsedA1OCPU, summary.UsedA1OCPU+task.OCPU, maxOCPU)
+		if summary.UsedA1OCPU+task.OCPU > summary.TotalFreeOCPU {
+			return fmt.Errorf("【CPU额度硬阻断】申请 %0.1f OCPU + 当前已用 %0.1f OCPU = %0.1f OCPU，超出免费额度 %0.1f OCPU",
+				task.OCPU, summary.UsedA1OCPU, summary.UsedA1OCPU+task.OCPU, summary.TotalFreeOCPU)
 		}
-
-		if summary.UsedA1MemoryGB+task.MemoryInGBs > maxMem {
-			return fmt.Errorf("【内存额度硬阻断】申请 %0.1f GB + 当前已用 %0.1f GB = %0.1f GB，已超出当前账号免费额度 (%0.1f GB)",
-				task.MemoryInGBs, summary.UsedA1MemoryGB, summary.UsedA1MemoryGB+task.MemoryInGBs, maxMem)
+		if summary.UsedA1MemoryGB+task.MemoryInGBs > summary.TotalFreeMemoryGB {
+			return fmt.Errorf("【内存额度硬阻断】申请 %0.1f GB + 当前已用 %0.1f GB = %0.1f GB，超出免费额度 %0.1f GB",
+				task.MemoryInGBs, summary.UsedA1MemoryGB, summary.UsedA1MemoryGB+task.MemoryInGBs, summary.TotalFreeMemoryGB)
 		}
 	} else if strings.Contains(task.Shape, "E2.1.Micro") {
-		if summary.MicroCount >= 2 {
-			return fmt.Errorf("【AMD数量硬阻断】当前已有 %d 台 VM.Standard.E2.1.Micro 实例，已达到 2 台免费上限", summary.MicroCount)
+		if summary.MicroCount >= summary.MaxMicroCount {
+			return fmt.Errorf("【AMD数量硬阻断】当前已有 %d 台 VM.Standard.E2.1.Micro 实例，已达到 %d 台免费上限", summary.MicroCount, summary.MaxMicroCount)
 		}
 	}
 

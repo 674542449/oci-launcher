@@ -1,23 +1,259 @@
+/* Self-hosted monospace face for identifiers, numbers and the live log (CSP: font-src 'self'). */
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+/* ---------- Design tokens ---------- */
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  /* warm neutral ground, white surfaces, Oracle red as the single accent */
+  --c-bg: #f4f3f1;
+  --c-surface: #ffffff;
+  --c-surface-2: #f8f7f5;
+  --c-line: #e4e1dc;
+  --c-line-strong: #cfcac3;
+
+  --c-ink: #1c1917;
+  --c-ink-2: #57534e;
+  --c-ink-3: #6f6862;
+
+  --c-brand: #c74634;
+  --c-brand-hover: #b23e2d;
+  --c-brand-pressed: #9c3527;
+  --c-brand-soft: #fceeeb;
+
+  --c-ok: #1e7f4f;
+  --c-ok-soft: #e8f5ee;
+  --c-warn: #b7791f;
+  --c-warn-soft: #fbf3e3;
+  --c-danger: #b42318;
+  --c-danger-soft: #fdecea;
+  --c-info: #2f6fed;
+  --c-info-soft: #eaf1fd;
+
+  /* dark rail + terminal share one warm charcoal */
+  --c-side: #1c1917;
+  --c-side-2: #292524;
+  --c-side-3: #3b3733;
+  --c-side-ink: #e7e5e4;
+  --c-side-muted: #a8a29e;
+
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
+    'Microsoft YaHei', 'Noto Sans SC', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', 'SF Mono', Menlo, Consolas, monospace;
 }
 
-/* Custom scrollbars */
+/* ---------- Base ---------- */
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    background: var(--c-bg);
+    color: var(--c-ink);
+    line-height: 1.5;
+    font-feature-settings: 'tnum' 1;
+    -webkit-font-smoothing: antialiased;
+  }
+  ::selection {
+    background: var(--c-brand);
+    color: #fff;
+  }
+  :focus-visible {
+    outline: 2px solid var(--c-brand);
+    outline-offset: 2px;
+  }
+  code,
+  kbd,
+  pre {
+    font-family: var(--font-mono);
+  }
+}
+
+/* ---------- Reusable pieces ---------- */
+@layer components {
+  .card {
+    @apply bg-surface border border-line rounded-xl;
+  }
+  .card-pad {
+    @apply p-5 sm:p-6;
+  }
+  .card-head {
+    @apply flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between;
+  }
+  .section-title {
+    @apply text-[15px] font-semibold text-ink leading-6;
+  }
+  .caption {
+    @apply text-xs text-ink-3 leading-5;
+  }
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+  .label {
+    @apply block text-xs font-medium text-ink-2 mb-1.5;
+  }
+
+  /* data tables */
+  .tbl-wrap {
+    @apply w-full overflow-x-auto;
+  }
+  .tbl {
+    @apply min-w-full text-[13px] text-left border-collapse;
+  }
+  .tbl thead th {
+    @apply px-4 py-2.5 text-xs font-medium text-ink-3 bg-surface-2 border-b border-line whitespace-nowrap;
+  }
+  .tbl tbody td {
+    @apply px-4 py-3 border-b border-line align-top text-ink;
+  }
+  .tbl tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .tbl tbody tr {
+    transition: background-color 150ms ease;
+  }
+  .tbl tbody tr:hover td {
+    background: var(--c-surface-2);
+  }
+
+  /* status pills: colour + dot + text, never colour alone */
+  .pill {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-medium whitespace-nowrap;
+  }
+  .pill::before {
+    content: '';
+    @apply block h-1.5 w-1.5 rounded-full bg-current;
+  }
+  .pill-ok {
+    color: var(--c-ok);
+    background: var(--c-ok-soft);
+    border-color: transparent;
+  }
+  .pill-warn {
+    color: var(--c-warn);
+    background: var(--c-warn-soft);
+    border-color: transparent;
+  }
+  .pill-danger {
+    color: var(--c-danger);
+    background: var(--c-danger-soft);
+    border-color: transparent;
+  }
+  .pill-info {
+    color: var(--c-info);
+    background: var(--c-info-soft);
+    border-color: transparent;
+  }
+  .pill-muted {
+    color: var(--c-ink-2);
+    background: var(--c-surface-2);
+    border-color: var(--c-line);
+  }
+  .pill-live::before {
+    animation: pulse-dot 1.6s ease-in-out infinite;
+  }
+
+  /* inline text actions inside tables */
+  .txt-btn {
+    @apply text-xs font-medium text-brand hover:text-brand-hover underline-offset-2 hover:underline rounded transition-colors;
+  }
+  .txt-btn-muted {
+    @apply text-xs font-medium text-ink-3 hover:text-ink underline-offset-2 hover:underline rounded transition-colors;
+  }
+
+  /* notices */
+  .notice {
+    @apply flex gap-3 rounded-xl border px-4 py-3 text-[13px] leading-5;
+  }
+  .notice-warn {
+    background: var(--c-warn-soft);
+    border-color: #f1dfb8;
+    color: #7c5210;
+  }
+  .notice-info {
+    background: var(--c-info-soft);
+    border-color: #cfe0fb;
+    color: #1e3f8f;
+  }
+  .notice-danger {
+    background: var(--c-danger-soft);
+    border-color: #f5c6c1;
+    color: #8a1c13;
+  }
+
+  /* dark terminal surface */
+  .term {
+    background: var(--c-side);
+    color: var(--c-side-ink);
+  }
+}
+
+/* ---------- Motion ---------- */
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.8);
+  }
+}
+/* Route change: a short fade-up on the incoming page. Keyframe-based so a throttled
+   background tab can never leave the page half-faded. */
+@keyframes page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.page-enter-active {
+  animation: page-in 180ms ease both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ---------- Scrollbars ---------- */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 8px;
+  height: 8px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--c-line-strong);
   border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  background: #a8a29e;
+  background-clip: padding-box;
+}
+.term::-webkit-scrollbar-thumb,
+.term *::-webkit-scrollbar-thumb {
+  background: var(--c-side-3);
+  background-clip: padding-box;
 }

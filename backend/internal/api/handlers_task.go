@@ -2,13 +2,17 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"oci-panel/internal/cache"
+	"oci-panel/internal/config"
 	"oci-panel/internal/engine"
+	"oci-panel/internal/notify"
 	"oci-panel/internal/oci"
+	"oci-panel/internal/security"
 	"oci-panel/internal/storage"
 
 	"github.com/gin-gonic/gin"
@@ -18,31 +22,62 @@ import (
 type CreateTaskRequest struct {
 	ProfileID           uint     `json:"profile_id" binding:"required"`
 	InstanceName        string   `json:"instance_name" binding:"required,min=2,max=128"`
-	Shape               string   `json:"shape" binding:"required"`
+	Shape               string   `json:"shape" binding:"required,oneof=VM.Standard.A1.Flex VM.Standard.E2.1.Micro"`
 	OCPU                float64  `json:"ocpu" binding:"required,min=1,max=4"`
 	MemoryInGBs         float64  `json:"memory_in_gbs" binding:"required,min=1,max=24"`
-	BootVolumeSizeInGBs int64    `json:"boot_volume_size_in_gbs" binding:"required,min=47,max=200"`
-	BootVolumeVPU       int64    `json:"boot_volume_vpu"` // Default 120 VPU Ultra High Performance
+	BootVolumeSizeInGBs int64    `json:"boot_volume_size_in_gbs" binding:"required,min=50,max=200"`
+	BootVolumeVPU       int64    `json:"boot_volume_vpu" binding:"min=0,max=120"`
 	Region              string   `json:"region" binding:"required"`
 	ADList              []string `json:"ad_list"`
 	ImageOCID           string   `json:"image_ocid" binding:"required"`
 	SubnetOCID          string   `json:"subnet_ocid" binding:"required"`
-	LoginMode           string   `json:"login_mode"` // root_key, root_password
+	LoginMode           string   `json:"login_mode" binding:"omitempty,oneof=root_key root_password"`
 	SSHAuthorizedKeys   string   `json:"ssh_authorized_keys"`
-	RootPassword        string   `json:"root_password"`
+	RootPassword        string   `json:"root_password" binding:"max=128"`
 	AssignPublicIP      bool     `json:"assign_public_ip"`
 	EnableIPv6          bool     `json:"enable_ipv6"`
-	RetryIntervalSecs   int      `json:"retry_interval_secs"`
-	MaxRetries          int      `json:"max_retries"`
+	RetryIntervalSecs   int      `json:"retry_interval_secs" binding:"min=0,max=86400"`
+	MaxRetries          int      `json:"max_retries" binding:"min=0"`
 }
 
-// ListTasks lists all tasks
+const accountLockHandlerTTL = 2 * time.Minute
+
+func parseTaskID(c *gin.Context) (uuid.UUID, bool) {
+	taskID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+		return uuid.Nil, false
+	}
+	return taskID, true
+}
+
+// acquireLockOrReject takes the single-account lock for the profile or writes a 409.
+func acquireLockOrReject(c *gin.Context, profileID uint) bool {
+	ok, lockedBy, err := cache.AcquireAccountLock(c.Request.Context(), profileID, accountLockHandlerTTL)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取账号并发锁失败 (Redis 不可用): " + err.Error()})
+		return false
+	}
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{
+			"error": "系统同一时间只允许操作一个 OCI 账号。账号 ID [" + lockedBy + "] 的任务正在运行，请先停止它或稍后再试。",
+		})
+		return false
+	}
+	return true
+}
+
+// ListTasks lists tasks, optionally filtered by profile
 func ListTasks(c *gin.Context) {
-	profileID := c.Query("profile_id")
 	var tasks []storage.LaunchTask
 
 	query := storage.DB.Order("created_at DESC")
-	if profileID != "" {
+	if raw := c.Query("profile_id"); raw != "" {
+		profileID, ok := parseID(raw)
+		if !ok {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "profile_id 无效"})
+			return
+		}
 		query = query.Where("profile_id = ?", profileID)
 	}
 	query.Find(&tasks)
@@ -50,7 +85,7 @@ func ListTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
-// CreateTask creates a launch task and starts background worker
+// CreateTask creates a launch task and starts the background worker
 func CreateTask(c *gin.Context) {
 	var req CreateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -64,53 +99,70 @@ func CreateTask(c *gin.Context) {
 		return
 	}
 
-	// 1. Single-Account Concurrency Lock check: only 1 profile can be operated at the same time
-	ok, lockedBy, err := cache.AcquireAccountLock(c.Request.Context(), profile.ID, 30*time.Second)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取账号并发锁失败 (Redis 不可用): " + err.Error()})
-		return
-	}
-	if !ok {
-		c.JSON(http.StatusConflict, gin.H{
-			"error": "【单账号并发锁限制】系统同一时间最多只允许并发操作一个 OCI 账号。当前正在执行账号 ID [" + lockedBy + "] 的操作，系统保护生效中，请稍候再试。",
-		})
-		return
-	}
-
-	// 2. Format AD list as JSON
-	adBytes, _ := json.Marshal(req.ADList)
-
-	vpu := req.BootVolumeVPU
-	if vpu <= 0 {
-		vpu = 120 // Default 120 VPU
-	}
-
 	loginMode := req.LoginMode
 	if loginMode == "" {
 		loginMode = "root_key"
+	}
+	if loginMode == "root_password" && strings.TrimSpace(req.RootPassword) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "密码登录模式需要提供 root 密码"})
+		return
+	}
+	if strings.Contains(req.Shape, "Micro") {
+		req.OCPU, req.MemoryInGBs = 1, 1
+	}
+
+	// One OCI account at a time (the worker keeps refreshing this lock while it runs)
+	if !acquireLockOrReject(c, profile.ID) {
+		return
+	}
+	releaseLock := func() { _ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID) }
+
+	adList := ""
+	if len(req.ADList) > 0 {
+		adBytes, _ := json.Marshal(req.ADList)
+		adList = string(adBytes)
+	}
+
+	vpu := req.BootVolumeVPU
+	if vpu <= 0 {
+		vpu = 120
 	}
 
 	retryInterval := req.RetryIntervalSecs
 	if retryInterval <= 0 {
 		retryInterval = 60
+	} else if retryInterval < 15 {
+		retryInterval = 15
+	}
+
+	// The root password is stored encrypted at rest and decrypted only inside the worker
+	rootPasswordEnc := ""
+	if loginMode == "root_password" {
+		enc, err := security.EncryptAES256GCM(req.RootPassword, config.GlobalConfig.MasterKey)
+		if err != nil {
+			releaseLock()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "加密 root 密码失败: " + err.Error()})
+			return
+		}
+		rootPasswordEnc = enc
 	}
 
 	task := storage.LaunchTask{
 		ID:                  uuid.New(),
 		ProfileID:           profile.ID,
-		InstanceName:        req.InstanceName,
+		InstanceName:        strings.TrimSpace(req.InstanceName),
 		Shape:               req.Shape,
 		OCPU:                req.OCPU,
 		MemoryInGBs:         req.MemoryInGBs,
 		BootVolumeSizeInGBs: req.BootVolumeSizeInGBs,
 		BootVolumeVPU:       vpu,
-		Region:              req.Region,
-		ADList:              string(adBytes),
+		Region:              strings.TrimSpace(req.Region),
+		ADList:              adList,
 		ImageOCID:           req.ImageOCID,
 		SubnetOCID:          req.SubnetOCID,
 		LoginMode:           loginMode,
-		SSHAuthorizedKeys:   req.SSHAuthorizedKeys,
-		RootPasswordEnc:     req.RootPassword,
+		SSHAuthorizedKeys:   strings.TrimSpace(req.SSHAuthorizedKeys),
+		RootPasswordEnc:     rootPasswordEnc,
 		AssignPublicIP:      req.AssignPublicIP,
 		EnableIPv6:          req.EnableIPv6,
 		Status:              "running",
@@ -119,47 +171,53 @@ func CreateTask(c *gin.Context) {
 		CreatedAt:           time.Now(),
 	}
 
-	// 3. 100% Free Tier Boundary Hard-Blocking Check!
+	// Zero-cost guard: home region, storage total, A1 / Micro allowance
 	if err := oci.ValidateFreeTierConstraint(c.Request.Context(), &profile, &task); err != nil {
-		_ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID)
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": err.Error(),
-		})
+		releaseLock()
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 4. Save to DB
 	if err := storage.DB.Create(&task).Error; err != nil {
-		_ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID)
+		releaseLock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存开机任务失败: " + err.Error()})
 		return
 	}
 
-	// 5. Start async retry engine
 	if err := engine.StartTask(task.ID); err != nil {
+		releaseLock()
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动后台抢机调度器失败: " + err.Error()})
 		return
 	}
 
+	storage.LogAudit("CREATE_TASK", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
+		fmt.Sprintf("%s %s %.0fC/%.0fG %dGB in %s", task.InstanceName, task.Shape, task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, task.Region), "SUCCESS")
+
 	c.JSON(http.StatusOK, gin.H{
-		"message": "开机任务已成功创建并在后台全速启动！",
+		"message": "抢机任务已创建并在后台运行",
 		"task_id": task.ID.String(),
 		"task":    task,
 	})
 }
 
-// StartExistingTask resumes a stopped task
+// StartExistingTask resumes a stopped or failed task
 func StartExistingTask(c *gin.Context) {
-	taskIDStr := c.Param("id")
-	taskID, err := uuid.Parse(taskIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+	taskID, ok := parseTaskID(c)
+	if !ok {
 		return
 	}
 
 	var task storage.LaunchTask
 	if err := storage.DB.First(&task, "id = ?", taskID).Error; err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Task not found"})
+		return
+	}
+	if task.Status == "success" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该任务已经成功创建实例，请新建任务"})
+		return
+	}
+	if task.Status == "running" && engine.IsTaskActive(taskID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "任务已在运行中"})
 		return
 	}
 
@@ -169,13 +227,21 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 
-	// Free tier re-validation
+	if !acquireLockOrReject(c, profile.ID) {
+		return
+	}
+
 	if err := oci.ValidateFreeTierConstraint(c.Request.Context(), &profile, &task); err != nil {
+		_ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	// A manual restart starts a fresh attempt budget; the attempt history is kept.
+	storage.DB.Model(&task).Update("current_retries", 0)
+
 	if err := engine.StartTask(taskID); err != nil {
+		_ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -183,12 +249,10 @@ func StartExistingTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "抢机任务已重新启动"})
 }
 
-// StopExistingTask pauses a running task
+// StopExistingTask stops a running task
 func StopExistingTask(c *gin.Context) {
-	taskIDStr := c.Param("id")
-	taskID, err := uuid.Parse(taskIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+	taskID, ok := parseTaskID(c)
+	if !ok {
 		return
 	}
 
@@ -196,12 +260,10 @@ func StopExistingTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "抢机任务已停止"})
 }
 
-// DeleteExistingTask deletes a task and attempt history
+// DeleteExistingTask deletes a task and its attempt history
 func DeleteExistingTask(c *gin.Context) {
-	taskIDStr := c.Param("id")
-	taskID, err := uuid.Parse(taskIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+	taskID, ok := parseTaskID(c)
+	if !ok {
 		return
 	}
 
@@ -219,22 +281,18 @@ func ListPresets(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"presets": presets})
 }
 
-// ListDynamicUbuntuImages queries latest 2 official Ubuntu LTS images
+// ListDynamicUbuntuImages returns the newest two official Ubuntu LTS images for a shape
 func ListDynamicUbuntuImages(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	shape := c.Query("shape")
-	region := c.Query("region")
-
-	if shape == "" {
-		shape = "VM.Standard.A1.Flex"
-	}
-
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 
+	shape := c.Query("shape")
+	if shape == "" {
+		shape = "VM.Standard.A1.Flex"
+	}
+	region := c.Query("region")
 	if region == "" {
 		region = profile.Region
 	}
@@ -248,12 +306,10 @@ func ListDynamicUbuntuImages(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"images": images})
 }
 
-// ListTaskAttempts returns attempts for a task
+// ListTaskAttempts returns the most recent attempts of a task
 func ListTaskAttempts(c *gin.Context) {
-	taskIDStr := c.Param("id")
-	taskID, err := uuid.Parse(taskIDStr)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid task ID"})
+	taskID, ok := parseTaskID(c)
+	if !ok {
 		return
 	}
 
@@ -263,14 +319,19 @@ func ListTaskAttempts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"attempts": attempts})
 }
 
-// GetAuditLogs returns immutable audit logs
+// GetAuditLogs returns the most recent audit log entries
 func GetAuditLogs(c *gin.Context) {
 	var logs []storage.AuditLog
 	storage.DB.Order("created_at DESC").Limit(200).Find(&logs)
 	c.JSON(http.StatusOK, gin.H{"logs": logs})
 }
 
-// SaveSetting saves Telegram or system setting
+var allowedSettingKeys = map[string]bool{
+	"tg_bot_token": true,
+	"tg_chat_id":   true,
+}
+
+// SaveSetting saves a system setting
 func SaveSetting(c *gin.Context) {
 	var req struct {
 		Key   string `json:"key" binding:"required"`
@@ -278,6 +339,10 @@ func SaveSetting(c *gin.Context) {
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if !allowedSettingKeys[req.Key] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "未知的设置项: " + req.Key})
 		return
 	}
 
@@ -288,17 +353,18 @@ func SaveSetting(c *gin.Context) {
 	}
 	storage.DB.Save(&setting)
 
+	storage.LogAudit("SAVE_SETTING", "admin", c.ClientIP(), c.GetHeader("User-Agent"), "Updated "+req.Key, "SUCCESS")
+
 	c.JSON(http.StatusOK, gin.H{"message": "设置已保存"})
 }
 
-// GetSettings gets all settings
+// GetSettings returns all settings (bot token masked)
 func GetSettings(c *gin.Context) {
 	var settings []storage.SystemSetting
 	storage.DB.Find(&settings)
 
 	res := make(map[string]string)
 	for _, s := range settings {
-		// Mask sensitive bot token
 		val := s.Value
 		if s.Key == "tg_bot_token" && len(val) > 8 {
 			val = val[:4] + "********" + val[len(val)-4:]
@@ -307,4 +373,20 @@ func GetSettings(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"settings": res})
+}
+
+// TestTelegram sends a test message with the saved bot token and chat id.
+// It runs server-side because the browser CSP does not allow calls to api.telegram.org.
+func TestTelegram(c *gin.Context) {
+	botToken, chatID := notify.GetGlobalTelegramConfig()
+	if botToken == "" || chatID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请先保存 Bot Token 和 Chat ID"})
+		return
+	}
+	text := "🔔 <b>OCI 控制台测试消息</b>\nTelegram 通知配置正常，开机成功与任务熔断告警会发送到这里。"
+	if err := notify.SendTelegramMessage(botToken, chatID, text); err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "发送失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "测试消息已发送，请查看 Telegram"})
 }

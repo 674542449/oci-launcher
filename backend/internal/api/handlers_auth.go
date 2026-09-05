@@ -147,9 +147,22 @@ func Verify2FAStep2(c *gin.Context) {
 		return
 	}
 
+	ctx := c.Request.Context()
+	clientIP := c.ClientIP()
+
 	claims, err := auth.ValidateJWT(req.TempToken)
-	if err != nil {
+	if err != nil || claims.Is2FAVerified || claims.ID == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "2FA token expired or invalid, please login again"})
+		return
+	}
+	// A temp token is single-use: consumed on success or after too many wrong codes
+	if cache.IsJTIBlacklisted(ctx, claims.ID) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "2FA token already used, please login again"})
+		return
+	}
+	// The one-time code must be entered from the same device that entered the password
+	if claims.DeviceFingerprint != security.GenerateDeviceFingerprint(c.GetHeader("User-Agent"), clientIP) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "2FA token does not belong to this device, please login again"})
 		return
 	}
 
@@ -166,31 +179,46 @@ func Verify2FAStep2(c *gin.Context) {
 		return
 	}
 
-	// 2. Verify TOTP Code
+	// 2. Verify TOTP code; wrong codes count against the temp token and the client IP
 	if !auth.VerifyTOTPCode(secret, req.Code) {
+		failures, _ := cache.RecordTOTPFailure(ctx, claims.ID)
+		isLocked, lockDur, attempts, _ := cache.RecordLoginFailure(ctx, clientIP, user.Username)
+		storage.LogAudit("2FA_FAIL", user.Username, clientIP, c.GetHeader("User-Agent"), fmt.Sprintf("Wrong 2FA code (token failure %d, ip failure %d)", failures, attempts), "FAILED")
+		if failures >= 5 {
+			_ = cache.BlacklistJTI(ctx, claims.ID, 10*time.Minute)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Too many wrong 2FA codes, please login again"})
+			return
+		}
+		if isLocked {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": fmt.Sprintf("Too many failed attempts. Account locked for %v", lockDur)})
+			return
+		}
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid 2FA code"})
 		return
 	}
 
 	// 3. Atomically check and lock code against replay attacks
-	if !cache.CheckAndSetTOTPUsed(c.Request.Context(), user.ID, req.Code) {
+	if !cache.CheckAndSetTOTPUsed(ctx, user.ID, req.Code) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "This 2FA code was already consumed. Please wait for the next 30s code."})
 		return
 	}
 
+	// Consume the temp token
+	_ = cache.BlacklistJTI(ctx, claims.ID, 10*time.Minute)
+
 	// Success! Generate full JWT
-	token, _, err := auth.GenerateFullJWT(&user, c.GetHeader("User-Agent"), c.ClientIP())
+	token, _, err := auth.GenerateFullJWT(&user, c.GetHeader("User-Agent"), clientIP)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate session token"})
 		return
 	}
 
 	// Clear login failure counter
-	cache.ResetLoginFailures(c.Request.Context(), c.ClientIP())
+	cache.ResetLoginFailures(ctx, clientIP)
 
-	// Set HttpOnly, Secure, SameSite=Strict Cookie
+	// HttpOnly, SameSite=Strict; Secure whenever the client came in over HTTPS
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie("oci_auth_token", token, 86400, "/", "", false, true)
+	c.SetCookie("oci_auth_token", token, 86400, "/", "", isRequestSecure(c), true)
 
 	storage.LogAudit("LOGIN_SUCCESS", user.Username, c.ClientIP(), c.GetHeader("User-Agent"), "Logged in with 2FA successfully", "SUCCESS")
 
@@ -214,7 +242,7 @@ func Logout(c *gin.Context) {
 
 	// Clear Cookie
 	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie("oci_auth_token", "", -1, "/", "", false, true)
+	c.SetCookie("oci_auth_token", "", -1, "/", "", isRequestSecure(c), true)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }

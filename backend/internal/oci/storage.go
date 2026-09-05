@@ -3,12 +3,12 @@ package oci
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"oci-panel/internal/storage"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/core"
-	"github.com/oracle/oci-go-sdk/v65/identity"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 )
 
@@ -16,7 +16,7 @@ type BootVolumeItem struct {
 	OCID         string `json:"ocid"`
 	DisplayName  string `json:"display_name"`
 	SizeInGBs    int64  `json:"size_in_gbs"`
-	VpusPerGB    int64  `json:"vpus_per_gb"` // 10 to 120 (Boot volumes require min 10 VPU)
+	VpusPerGB    int64  `json:"vpus_per_gb"` // 10 to 120 (boot volumes require min 10 VPU)
 	State        string `json:"state"`
 	AD           string `json:"ad"`
 	TimeCreated  string `json:"time_created"`
@@ -44,124 +44,111 @@ type VolumeBackupItem struct {
 }
 
 type BucketItem struct {
-	Name          string `json:"name"`
-	Namespace     string `json:"namespace"`
-	StorageTier   string `json:"storage_tier"`
-	PublicAccess  string `json:"public_access"`
-	ApproxSizeGB  int64  `json:"approx_size_gb"`
-	TimeCreated   string `json:"time_created"`
+	Name         string `json:"name"`
+	Namespace    string `json:"namespace"`
+	StorageTier  string `json:"storage_tier"`
+	PublicAccess string `json:"public_access"`
+	ApproxSizeGB int64  `json:"approx_size_gb"`
+	TimeCreated  string `json:"time_created"`
 }
 
-// ListBootVolumes lists boot volumes across all availability domains
+const growCommands = "# Ubuntu / Oracle Linux: extend the root partition and filesystem after resizing the boot volume\nsudo oci-growfs -y 2>/dev/null || (sudo apt-get install -y cloud-guest-utils && sudo growpart /dev/sda 1 && sudo resize2fs /dev/sda1)"
+
+func fmtTime(t *common.SDKTime) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+// ListBootVolumes lists boot volumes across all availability domains of the region (all pages)
 func ListBootVolumes(ctx context.Context, profile *storage.OCIProfile, region string) ([]BootVolumeItem, error) {
 	blockClient, err := GetBlockstorageClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
 
-	idClient, err := GetIdentityClient(profile)
-	if err != nil {
-		return nil, err
-	}
-
-	adResp, err := idClient.ListAvailabilityDomains(ctx, identity.ListAvailabilityDomainsRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-	})
+	adNames, err := ListAvailabilityDomainNames(ctx, profile, region)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list availability domains: %w", err)
 	}
 
-	var items []BootVolumeItem
-	for _, ad := range adResp.Items {
-		if ad.Name == nil {
-			continue
-		}
+	items := []BootVolumeItem{}
+	for _, ad := range adNames {
 		req := core.ListBootVolumesRequest{
-			AvailabilityDomain: ad.Name,
+			AvailabilityDomain: common.String(ad),
 			CompartmentId:      common.String(profile.TenancyOCID),
+			Limit:              common.Int(100),
 		}
-
-		resp, err := blockClient.ListBootVolumes(ctx, req)
-		if err != nil {
-			continue
-		}
-
-		for _, bv := range resp.Items {
-			if bv.LifecycleState == core.BootVolumeLifecycleStateTerminated {
-				continue
+		for {
+			resp, err := blockClient.ListBootVolumes(ctx, req)
+			if err != nil {
+				return nil, fmt.Errorf("failed to list boot volumes in %s: %w", ad, err)
 			}
-
-			size := int64(50)
-			if bv.SizeInGBs != nil {
-				size = *bv.SizeInGBs
+			for _, bv := range resp.Items {
+				if bv.LifecycleState == core.BootVolumeLifecycleStateTerminated {
+					continue
+				}
+				vpu := Int64Val(bv.VpusPerGB)
+				if bv.VpusPerGB == nil {
+					vpu = 10
+				}
+				items = append(items, BootVolumeItem{
+					OCID:         StrVal(bv.Id),
+					DisplayName:  StrVal(bv.DisplayName),
+					SizeInGBs:    Int64Val(bv.SizeInGBs),
+					VpusPerGB:    vpu,
+					State:        string(bv.LifecycleState),
+					AD:           StrVal(bv.AvailabilityDomain),
+					TimeCreated:  fmtTime(bv.TimeCreated),
+					GrowCommands: growCommands,
+				})
 			}
-			vpu := int64(120)
-			if bv.VpusPerGB != nil {
-				vpu = *bv.VpusPerGB
+			if resp.OpcNextPage == nil {
+				break
 			}
-
-			timeStr := ""
-			if bv.TimeCreated != nil {
-				timeStr = bv.TimeCreated.Format("2006-01-02 15:04:05")
-			}
-
-			growCmds := fmt.Sprintf("# 适用于 Oracle Linux / Ubuntu (一键自动扩展磁盘分区):\nsudo oci-growfs -y || (sudo apt-get install -y cloud-guest-utils && sudo growpart /dev/sda 1 && sudo resize2fs /dev/sda1)")
-
-			items = append(items, BootVolumeItem{
-				OCID:         StrVal(bv.Id),
-				DisplayName:  StrVal(bv.DisplayName),
-				SizeInGBs:    size,
-				VpusPerGB:    vpu,
-				State:        string(bv.LifecycleState),
-				AD:           StrVal(bv.AvailabilityDomain),
-				TimeCreated:  timeStr,
-				GrowCommands: growCmds,
-			})
+			req.Page = resp.OpcNextPage
 		}
 	}
 
 	return items, nil
 }
 
-// ResizeBootVolume updates boot volume size and VPU (10-120)
+// ResizeBootVolume updates boot volume size and performance (10-120 VPU/GB in steps of 10)
 func ResizeBootVolume(ctx context.Context, profile *storage.OCIProfile, region, bootVolumeOCID string, newSizeGB, newVPU int64) error {
 	blockClient, err := GetBlockstorageClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	req := core.UpdateBootVolumeRequest{
+	_, err = blockClient.UpdateBootVolume(ctx, core.UpdateBootVolumeRequest{
 		BootVolumeId: common.String(bootVolumeOCID),
 		UpdateBootVolumeDetails: core.UpdateBootVolumeDetails{
-			SizeInGBs:   common.Int64(newSizeGB),
-			VpusPerGB:   common.Int64(newVPU),
+			SizeInGBs: common.Int64(newSizeGB),
+			VpusPerGB: common.Int64(normalizeVPU(newVPU, false)),
 		},
-	}
-
-	_, err = blockClient.UpdateBootVolume(ctx, req)
+	})
 	return err
 }
 
-// CreateBootVolumeBackup creates a backup snapshot
+// CreateBootVolumeBackup creates a full backup
 func CreateBootVolumeBackup(ctx context.Context, profile *storage.OCIProfile, region, bootVolumeOCID, name string) error {
 	blockClient, err := GetBlockstorageClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	req := core.CreateBootVolumeBackupRequest{
+	_, err = blockClient.CreateBootVolumeBackup(ctx, core.CreateBootVolumeBackupRequest{
 		CreateBootVolumeBackupDetails: core.CreateBootVolumeBackupDetails{
 			BootVolumeId: common.String(bootVolumeOCID),
 			DisplayName:  common.String(name),
 			Type:         core.CreateBootVolumeBackupDetailsTypeFull,
 		},
-	}
-
-	_, err = blockClient.CreateBootVolumeBackup(ctx, req)
+	})
 	return err
 }
 
-// ListBlockVolumes lists block volumes
+// ListBlockVolumes lists block volumes (all pages)
 func ListBlockVolumes(ctx context.Context, profile *storage.OCIProfile, region string) ([]BlockVolumeItem, error) {
 	blockClient, err := GetBlockstorageClient(profile, region)
 	if err != nil {
@@ -170,152 +157,166 @@ func ListBlockVolumes(ctx context.Context, profile *storage.OCIProfile, region s
 
 	req := core.ListVolumesRequest{
 		CompartmentId: common.String(profile.TenancyOCID),
+		Limit:         common.Int(100),
 	}
 
-	resp, err := blockClient.ListVolumes(ctx, req)
-	if err != nil {
-		return nil, err
-	}
-
-	var items []BlockVolumeItem
-	for _, vol := range resp.Items {
-		if vol.LifecycleState == core.VolumeLifecycleStateTerminated {
-			continue
+	items := []BlockVolumeItem{}
+	for {
+		resp, err := blockClient.ListVolumes(ctx, req)
+		if err != nil {
+			return nil, err
 		}
-
-		size := int64(50)
-		if vol.SizeInGBs != nil {
-			size = *vol.SizeInGBs
+		for _, vol := range resp.Items {
+			if vol.LifecycleState == core.VolumeLifecycleStateTerminated {
+				continue
+			}
+			items = append(items, BlockVolumeItem{
+				OCID:        StrVal(vol.Id),
+				DisplayName: StrVal(vol.DisplayName),
+				SizeInGBs:   Int64Val(vol.SizeInGBs),
+				VpusPerGB:   Int64Val(vol.VpusPerGB),
+				State:       string(vol.LifecycleState),
+				AD:          StrVal(vol.AvailabilityDomain),
+				TimeCreated: fmtTime(vol.TimeCreated),
+			})
 		}
-		vpu := int64(120)
-		if vol.VpusPerGB != nil {
-			vpu = *vol.VpusPerGB
+		if resp.OpcNextPage == nil {
+			break
 		}
-
-		timeStr := ""
-		if vol.TimeCreated != nil {
-			timeStr = vol.TimeCreated.Format("2006-01-02 15:04:05")
-		}
-
-		items = append(items, BlockVolumeItem{
-			OCID:        StrVal(vol.Id),
-			DisplayName: StrVal(vol.DisplayName),
-			SizeInGBs:   size,
-			VpusPerGB:   vpu,
-			State:       string(vol.LifecycleState),
-			AD:          StrVal(vol.AvailabilityDomain),
-			TimeCreated: timeStr,
-		})
+		req.Page = resp.OpcNextPage
 	}
 
 	return items, nil
 }
 
-// CreateBlockVolume creates a new block volume with VPU
+// CreateBlockVolume creates a new block volume (0 = lower cost, 10 = balanced, 20 = higher, 30-120 = ultra high)
 func CreateBlockVolume(ctx context.Context, profile *storage.OCIProfile, region, ad, name string, sizeGB, vpu int64) error {
 	blockClient, err := GetBlockstorageClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	req := core.CreateVolumeRequest{
+	_, err = blockClient.CreateVolume(ctx, core.CreateVolumeRequest{
 		CreateVolumeDetails: core.CreateVolumeDetails{
 			CompartmentId:      common.String(profile.TenancyOCID),
 			AvailabilityDomain: common.String(ad),
 			DisplayName:        common.String(name),
 			SizeInGBs:          common.Int64(sizeGB),
-			VpusPerGB:          common.Int64(vpu),
+			VpusPerGB:          common.Int64(normalizeVPU(vpu, true)),
 		},
-	}
-
-	_, err = blockClient.CreateVolume(ctx, req)
+	})
 	return err
 }
 
-// ListBuckets lists Object Storage buckets
+func getNamespace(ctx context.Context, osClient objectstorage.ObjectStorageClient) (string, error) {
+	nsResp, err := osClient.GetNamespace(ctx, objectstorage.GetNamespaceRequest{})
+	if err != nil {
+		return "", fmt.Errorf("failed to get object storage namespace: %w", err)
+	}
+	if nsResp.Value == nil || *nsResp.Value == "" {
+		return "", fmt.Errorf("failed to get object storage namespace: empty response")
+	}
+	return *nsResp.Value, nil
+}
+
+// ListBuckets lists Object Storage buckets with tier, access type and approximate size
 func ListBuckets(ctx context.Context, profile *storage.OCIProfile, region string) ([]BucketItem, error) {
 	osClient, err := GetObjectStorageClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
 
-	// 1. Get Namespace
-	nsResp, err := osClient.GetNamespace(ctx, objectstorage.GetNamespaceRequest{})
-	if err != nil || nsResp.Value == nil {
-		return nil, fmt.Errorf("failed to get object storage namespace: %w", err)
-	}
-	namespace := *nsResp.Value
-
-	// 2. List buckets
-	req := objectstorage.ListBucketsRequest{
-		NamespaceName: common.String(namespace),
-		CompartmentId: common.String(profile.TenancyOCID),
-	}
-
-	resp, err := osClient.ListBuckets(ctx, req)
+	namespace, err := getNamespace(ctx, osClient)
 	if err != nil {
 		return nil, err
 	}
 
-	var items []BucketItem
-	for _, b := range resp.Items {
-		timeStr := ""
-		if b.TimeCreated != nil {
-			timeStr = b.TimeCreated.Format("2006-01-02 15:04:05")
+	req := objectstorage.ListBucketsRequest{
+		NamespaceName: common.String(namespace),
+		CompartmentId: common.String(profile.TenancyOCID),
+		Limit:         common.Int(100),
+	}
+
+	var summaries []objectstorage.BucketSummary
+	for {
+		resp, err := osClient.ListBuckets(ctx, req)
+		if err != nil {
+			return nil, err
 		}
-		items = append(items, BucketItem{
+		summaries = append(summaries, resp.Items...)
+		if resp.OpcNextPage == nil {
+			break
+		}
+		req.Page = resp.OpcNextPage
+	}
+
+	items := make([]BucketItem, 0, len(summaries))
+	for i, b := range summaries {
+		item := BucketItem{
 			Name:        StrVal(b.Name),
 			Namespace:   namespace,
-			TimeCreated: timeStr,
-		})
+			TimeCreated: fmtTime(b.TimeCreated),
+		}
+		// Tier / access / size only exist on the full Bucket object (one extra call per bucket)
+		if i < 50 && b.Name != nil {
+			detail, err := osClient.GetBucket(ctx, objectstorage.GetBucketRequest{
+				NamespaceName: common.String(namespace),
+				BucketName:    b.Name,
+				Fields:        []objectstorage.GetBucketFieldsEnum{objectstorage.GetBucketFieldsApproximatesize},
+			})
+			if err == nil {
+				item.StorageTier = string(detail.Bucket.StorageTier)
+				item.PublicAccess = string(detail.Bucket.PublicAccessType)
+				if detail.Bucket.ApproximateSize != nil {
+					item.ApproxSizeGB = *detail.Bucket.ApproximateSize / (1024 * 1024 * 1024)
+				}
+			}
+		}
+		items = append(items, item)
 	}
 
 	return items, nil
 }
 
-// CreateBucket creates an Object Storage bucket
+// CreateBucket creates a private Standard-tier bucket
 func CreateBucket(ctx context.Context, profile *storage.OCIProfile, region, bucketName string) error {
 	osClient, err := GetObjectStorageClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	nsResp, err := osClient.GetNamespace(ctx, objectstorage.GetNamespaceRequest{})
-	if err != nil || nsResp.Value == nil {
+	namespace, err := getNamespace(ctx, osClient)
+	if err != nil {
 		return err
 	}
 
-	req := objectstorage.CreateBucketRequest{
-		NamespaceName: nsResp.Value,
+	_, err = osClient.CreateBucket(ctx, objectstorage.CreateBucketRequest{
+		NamespaceName: common.String(namespace),
 		CreateBucketDetails: objectstorage.CreateBucketDetails{
-			Name:          common.String(bucketName),
-			CompartmentId: common.String(profile.TenancyOCID),
+			Name:             common.String(bucketName),
+			CompartmentId:    common.String(profile.TenancyOCID),
 			PublicAccessType: objectstorage.CreateBucketDetailsPublicAccessTypeNopublicaccess,
-			StorageTier:   objectstorage.CreateBucketDetailsStorageTierStandard,
+			StorageTier:      objectstorage.CreateBucketDetailsStorageTierStandard,
 		},
-	}
-
-	_, err = osClient.CreateBucket(ctx, req)
+	})
 	return err
 }
 
-// DeleteBucket deletes an Object Storage bucket
+// DeleteBucket deletes an (empty) bucket
 func DeleteBucket(ctx context.Context, profile *storage.OCIProfile, region, bucketName string) error {
 	osClient, err := GetObjectStorageClient(profile, region)
 	if err != nil {
 		return err
 	}
 
-	nsResp, err := osClient.GetNamespace(ctx, objectstorage.GetNamespaceRequest{})
-	if err != nil || nsResp.Value == nil {
+	namespace, err := getNamespace(ctx, osClient)
+	if err != nil {
 		return err
 	}
 
-	req := objectstorage.DeleteBucketRequest{
-		NamespaceName: nsResp.Value,
+	_, err = osClient.DeleteBucket(ctx, objectstorage.DeleteBucketRequest{
+		NamespaceName: common.String(namespace),
 		BucketName:    common.String(bucketName),
-	}
-
-	_, err = osClient.DeleteBucket(ctx, req)
+	})
 	return err
 }

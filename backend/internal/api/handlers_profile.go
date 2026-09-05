@@ -3,9 +3,7 @@ package api
 import (
 	"bufio"
 	"crypto/md5"
-	"crypto/rsa"
 	"crypto/x509"
-	"encoding/pem"
 	"fmt"
 	"net/http"
 	"os"
@@ -14,6 +12,7 @@ import (
 	"strings"
 
 	"oci-panel/internal/config"
+	"oci-panel/internal/engine"
 	"oci-panel/internal/oci"
 	"oci-panel/internal/security"
 	"oci-panel/internal/storage"
@@ -23,10 +22,10 @@ import (
 
 type ImportRawProfileRequest struct {
 	RawConfig     string `json:"raw_config" binding:"required"` // The raw INI text from Oracle console
-	PrivateKeyPEM string `json:"private_key_pem"`              // Manual paste or uploaded content
-	KeyFilePath   string `json:"key_file_path"`                // Or existing path on server
-	Tags          string `json:"tags"`                         // e.g. "Main,Tokyo,PAYG"
-	Notes         string `json:"notes"`                        // e.g. "Registered 2026-05, Visa ending 1234"
+	PrivateKeyPEM string `json:"private_key_pem"`               // Manual paste or uploaded content
+	KeyFilePath   string `json:"key_file_path"`                 // Or existing path on server
+	Tags          string `json:"tags"`                          // e.g. "Main,Tokyo,PAYG"
+	Notes         string `json:"notes"`                         // e.g. "Registered 2026-05, Visa ending 1234"
 }
 
 type UpdateProfileRequest struct {
@@ -34,6 +33,244 @@ type UpdateProfileRequest struct {
 	AccountTypeOverride string `json:"account_type_override"` // auto, free, payg
 	Tags                string `json:"tags"`
 	Notes               string `json:"notes"`
+}
+
+// iniProfile is one [section] of an OCI CLI style config
+type iniProfile struct {
+	Name        string
+	Tenancy     string
+	User        string
+	Fingerprint string
+	Region      string
+	KeyFile     string
+}
+
+var (
+	sectionRegex     = regexp.MustCompile(`^\s*\[(.*?)\]\s*$`)
+	ocidRegex        = regexp.MustCompile(`^ocid1\.[a-z0-9]+\.[a-z0-9]+(\.[a-z0-9-]*)?\.[a-z0-9]+$`)
+	fingerprintRegex = regexp.MustCompile(`^([0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}$`)
+	regionRegex      = regexp.MustCompile(`^[a-z]{2}-[a-z]+-[0-9]$`)
+)
+
+// parseOCIConfig parses every [section] of an OCI config block. Values are reset per section so
+// a pasted multi-profile ~/.oci/config does not bleed keys across sections.
+func parseOCIConfig(raw string) []iniProfile {
+	var out []iniProfile
+	cur := iniProfile{Name: "DEFAULT"}
+	started := false
+	flush := func() {
+		if started && (cur.Tenancy != "" || cur.User != "" || cur.Fingerprint != "" || cur.Region != "") {
+			out = append(out, cur)
+		}
+	}
+
+	scanner := bufio.NewScanner(strings.NewReader(raw))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if m := sectionRegex.FindStringSubmatch(line); len(m) > 1 {
+			flush()
+			cur = iniProfile{Name: strings.TrimSpace(m[1])}
+			started = true
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		started = true
+		k := strings.ToLower(strings.TrimSpace(parts[0]))
+		v := strings.TrimSpace(parts[1])
+		if idx := strings.Index(v, " #"); idx != -1 {
+			v = strings.TrimSpace(v[:idx])
+		}
+		switch k {
+		case "tenancy":
+			cur.Tenancy = v
+		case "user":
+			cur.User = v
+		case "fingerprint":
+			cur.Fingerprint = strings.ToLower(v)
+		case "region":
+			cur.Region = strings.ToLower(v)
+		case "key_file":
+			cur.KeyFile = v
+		}
+	}
+	flush()
+	return out
+}
+
+// allowedKeyDirs are the only host directories a key_file path may point into.
+func allowedKeyDirs() []string {
+	dirs := []string{}
+	if home, err := os.UserHomeDir(); err == nil {
+		dirs = append(dirs, filepath.Join(home, ".oci"))
+	}
+	dirs = append(dirs, "/root/.oci")
+	if config.GlobalConfig != nil && config.GlobalConfig.DataDir != "" {
+		if abs, err := filepath.Abs(config.GlobalConfig.DataDir); err == nil {
+			dirs = append(dirs, abs)
+		}
+	}
+	return dirs
+}
+
+// readKeyFile reads a private key from the host, confined to the allowed directories.
+func readKeyFile(path string) (string, error) {
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot resolve home directory")
+		}
+		path = filepath.Join(home, path[1:])
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	allowed := false
+	for _, dir := range allowedKeyDirs() {
+		if rel, err := filepath.Rel(dir, abs); err == nil && !strings.HasPrefix(rel, "..") {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return "", fmt.Errorf("私钥路径必须位于 ~/.oci 或数据目录内")
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		return "", fmt.Errorf("无法读取私钥文件: %v", err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 64*1024 {
+		return "", fmt.Errorf("私钥文件无效（不是普通文件或超过 64 KB）")
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return "", fmt.Errorf("无法读取私钥文件: %v", err)
+	}
+	return string(data), nil
+}
+
+// keyFingerprint computes the OCI API key fingerprint (MD5 of the PKIX public key DER).
+func keyFingerprint(pemContent string) (string, error) {
+	rsaKey, err := oci.ParseRSAPrivateKeyPEM(pemContent)
+	if err != nil {
+		return "", err
+	}
+	pubDer, err := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	if err != nil {
+		return "", err
+	}
+	sum := md5.Sum(pubDer)
+	parts := make([]string, 0, len(sum))
+	for _, b := range sum {
+		parts = append(parts, fmt.Sprintf("%02x", b))
+	}
+	return strings.Join(parts, ":"), nil
+}
+
+// uniqueProfileName returns name, or name-2 / name-3 ... when the name belongs to another tenancy/user.
+func uniqueProfileName(name, tenancy, user string) (string, bool) {
+	candidate := name
+	for i := 2; i < 100; i++ {
+		var existing storage.OCIProfile
+		err := storage.DB.Where("name = ?", candidate).First(&existing).Error
+		if err != nil {
+			return candidate, candidate != name // free name
+		}
+		if existing.TenancyOCID == tenancy && existing.UserOCID == user {
+			return candidate, candidate != name // same account: update in place
+		}
+		candidate = fmt.Sprintf("%s-%d", name, i)
+	}
+	return candidate, true
+}
+
+// upsertProfile validates one parsed section + key and stores it encrypted.
+func upsertProfile(p iniProfile, pemContent, tags, notes string) (*storage.OCIProfile, string, error) {
+	if p.Tenancy == "" || p.User == "" || p.Fingerprint == "" || p.Region == "" {
+		return nil, "", fmt.Errorf("配置块 [%s] 缺少 tenancy / user / fingerprint / region 之一", p.Name)
+	}
+	if !ocidRegex.MatchString(p.Tenancy) || !strings.HasPrefix(p.Tenancy, "ocid1.tenancy.") {
+		return nil, "", fmt.Errorf("tenancy OCID 格式无效: %s", p.Tenancy)
+	}
+	if !ocidRegex.MatchString(p.User) || !strings.HasPrefix(p.User, "ocid1.user.") {
+		return nil, "", fmt.Errorf("user OCID 格式无效: %s", p.User)
+	}
+	if !fingerprintRegex.MatchString(p.Fingerprint) {
+		return nil, "", fmt.Errorf("fingerprint 格式无效: %s", p.Fingerprint)
+	}
+	if !regionRegex.MatchString(p.Region) {
+		return nil, "", fmt.Errorf("region 格式无效: %s（应为类似 ap-tokyo-1 的区域名）", p.Region)
+	}
+
+	pemContent = strings.TrimSpace(pemContent)
+	if pemContent == "" {
+		return nil, "", fmt.Errorf("请提供私钥内容（粘贴 PEM、选择文件或填写宿主机路径）")
+	}
+	calc, err := keyFingerprint(pemContent)
+	if err != nil {
+		return nil, "", fmt.Errorf("私钥无法解析: %v", err)
+	}
+	if !strings.EqualFold(calc, p.Fingerprint) {
+		return nil, "", fmt.Errorf("私钥与配置块中的 fingerprint 不匹配（私钥指纹 %s，配置 %s）。请确认粘贴的是同一个 API 密钥", calc, p.Fingerprint)
+	}
+
+	keyEnc, err := security.EncryptAES256GCM(pemContent, config.GlobalConfig.MasterKey)
+	if err != nil {
+		return nil, "", fmt.Errorf("加密私钥失败: %v", err)
+	}
+
+	name, renamed := uniqueProfileName(p.Name, p.Tenancy, p.User)
+	note := ""
+	if renamed {
+		note = fmt.Sprintf("名称 [%s] 已被另一个账号使用，已保存为 [%s]", p.Name, name)
+	}
+
+	var profile storage.OCIProfile
+	if err := storage.DB.Where("name = ?", name).First(&profile).Error; err == nil {
+		// Same tenancy + user: key rotation / region update in place
+		profile.TenancyOCID = p.Tenancy
+		profile.UserOCID = p.User
+		profile.Fingerprint = p.Fingerprint
+		profile.Region = p.Region
+		profile.PrivateKeyEnc = keyEnc
+		if tags != "" {
+			profile.Tags = tags
+		}
+		if notes != "" {
+			profile.Notes = notes
+		}
+		profile.Status = "Active"
+		profile.StatusMessage = ""
+		if err := storage.DB.Save(&profile).Error; err != nil {
+			return nil, "", fmt.Errorf("保存账号失败: %v", err)
+		}
+	} else {
+		profile = storage.OCIProfile{
+			Name:                name,
+			TenancyOCID:         p.Tenancy,
+			UserOCID:            p.User,
+			Fingerprint:         p.Fingerprint,
+			Region:              p.Region,
+			PrivateKeyEnc:       keyEnc,
+			AccountTypeOverride: "auto",
+			Tags:                tags,
+			Notes:               notes,
+			Status:              "Active",
+			IsActive:            true,
+		}
+		if err := storage.DB.Create(&profile).Error; err != nil {
+			return nil, "", fmt.Errorf("保存账号失败: %v", err)
+		}
+	}
+
+	oci.InvalidateProfileCache(profile.ID)
+	return &profile, note, nil
 }
 
 // ListProfiles returns all OCI profiles (sensitive keys omitted)
@@ -46,7 +283,7 @@ func ListProfiles(c *gin.Context) {
 	})
 }
 
-// ImportRawProfile parses standard Oracle INI config block and stores encrypted profile
+// ImportRawProfile parses the Oracle console config block and stores the encrypted profile
 func ImportRawProfile(c *gin.Context) {
 	var req ImportRawProfileRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -54,175 +291,58 @@ func ImportRawProfile(c *gin.Context) {
 		return
 	}
 
-	// 1. Parse raw INI block
-	profileName := "DEFAULT"
-	tenancy := ""
-	user := ""
-	fingerprint := ""
-	region := ""
-	keyFileInConfig := ""
-
-	scanner := bufio.NewScanner(strings.NewReader(req.RawConfig))
-	sectionRegex := regexp.MustCompile(`^\s*\[(.*?)\]\s*$`)
-
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
-			continue
-		}
-
-		if match := sectionRegex.FindStringSubmatch(line); len(match) > 1 {
-			profileName = strings.TrimSpace(match[1])
-			continue
-		}
-
-		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			k := strings.ToLower(strings.TrimSpace(parts[0]))
-			v := strings.TrimSpace(parts[1])
-			// Strip trailing comments
-			if idx := strings.Index(v, "#"); idx != -1 {
-				v = strings.TrimSpace(v[:idx])
-			}
-
-			switch k {
-			case "tenancy":
-				tenancy = v
-			case "user":
-				user = v
-			case "fingerprint":
-				fingerprint = v
-			case "region":
-				region = v
-			case "key_file":
-				keyFileInConfig = v
-			}
-		}
-	}
-
-	if tenancy == "" || user == "" || fingerprint == "" || region == "" {
+	sections := parseOCIConfig(req.RawConfig)
+	if len(sections) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "未能从粘贴文本中解析出完整的 tenancy, user, fingerprint, region。请确保粘贴了 Oracle 控制台的标准配置块。",
+			"error": "未能从粘贴文本中解析出 tenancy, user, fingerprint, region。请粘贴 Oracle 控制台「添加 API 密钥」生成的配置块。",
 		})
 		return
 	}
+	if len(sections) > 1 {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("粘贴内容包含 %d 个配置段，请一次只导入一个账号，或使用「同步宿主机配置」", len(sections)),
+		})
+		return
+	}
+	section := sections[0]
 
-	// 2. Resolve Private Key PEM
 	pemContent := strings.TrimSpace(req.PrivateKeyPEM)
 	if pemContent == "" {
-		// Try keyFilePath from request or parsed config
-		targetPath := req.KeyFilePath
+		targetPath := strings.TrimSpace(req.KeyFilePath)
 		if targetPath == "" {
-			targetPath = keyFileInConfig
+			targetPath = section.KeyFile
 		}
 		if targetPath != "" {
-			// Expand ~
-			if strings.HasPrefix(targetPath, "~") {
-				home, _ := os.UserHomeDir()
-				targetPath = filepath.Join(home, targetPath[1:])
-			}
-			bytes, err := os.ReadFile(targetPath)
+			content, err := readKeyFile(targetPath)
 			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("无法从服务器路径读取私钥文件 (%s): %v", targetPath, err)})
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
-			pemContent = string(bytes)
+			pemContent = content
 		}
 	}
 
-	if pemContent == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请提供私钥内容（手动粘贴、文件选择或填写服务器文件路径）"})
-		return
-	}
-
-	// 3. Validate PEM format & calculate fingerprint
-	pemBlock, _ := pem.Decode([]byte(pemContent))
-	if pemBlock == nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "私钥文件格式无效，必须为 PEM 格式 (-----BEGIN RSA PRIVATE KEY-----)"})
-		return
-	}
-
-	var rsaKey *rsa.PrivateKey
-	parsedKey, err := x509.ParsePKCS1PrivateKey(pemBlock.Bytes)
+	profile, note, err := upsertProfile(section, pemContent, req.Tags, req.Notes)
 	if err != nil {
-		pkcs8Key, err2 := x509.ParsePKCS8PrivateKey(pemBlock.Bytes)
-		if err2 != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "无法解析私钥证书，请确认私钥未加密或格式为 RSA PKCS#1/PKCS#8"})
-			return
-		}
-		var ok bool
-		rsaKey, ok = pkcs8Key.(*rsa.PrivateKey)
-		if !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "提供的私钥不是 RSA 私钥"})
-			return
-		}
-	} else {
-		rsaKey = parsedKey
-	}
-
-	// Calculate MD5 fingerprint of public key DER for comparison
-	if rsaKey != nil {
-		pubDer, err3 := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
-		if err3 == nil {
-			md5Hash := md5.Sum(pubDer)
-			var parts []string
-			for _, b := range md5Hash {
-				parts = append(parts, fmt.Sprintf("%02x", b))
-			}
-			calcFingerprint := strings.Join(parts, ":")
-			// Normalize for comparison
-			if !strings.EqualFold(calcFingerprint, fingerprint) {
-				// Don't hard-fail if DER format differences occur, but log warning
-			}
-		}
-	}
-
-	// 4. Encrypt private key with AES-256-GCM
-	keyEnc, err := security.EncryptAES256GCM(pemContent, config.GlobalConfig.MasterKey)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "加密私钥失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 5. Save or update profile in DB
-	var profile storage.OCIProfile
-	if err := storage.DB.Where("name = ?", profileName).First(&profile).Error; err == nil {
-		// Update existing
-		profile.TenancyOCID = tenancy
-		profile.UserOCID = user
-		profile.Fingerprint = fingerprint
-		profile.Region = region
-		profile.PrivateKeyEnc = keyEnc
-		profile.Tags = req.Tags
-		profile.Notes = req.Notes
-		profile.Status = "Active"
-		storage.DB.Save(&profile)
-	} else {
-		// Create new
-		profile = storage.OCIProfile{
-			Name:                profileName,
-			TenancyOCID:         tenancy,
-			UserOCID:            user,
-			Fingerprint:         fingerprint,
-			Region:              region,
-			PrivateKeyEnc:       keyEnc,
-			AccountTypeOverride: "auto",
-			Tags:                req.Tags,
-			Notes:               req.Notes,
-			Status:              "Active",
-			IsActive:            true,
-		}
-		storage.DB.Create(&profile)
+	storage.LogAudit("IMPORT_PROFILE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Imported profile %s (%s)", profile.Name, profile.Region), "SUCCESS")
+
+	// Initial connectivity check
+	health, _ := oci.CheckSingleAccountHealth(c.Request.Context(), profile)
+
+	msg := "OCI 账号导入成功"
+	if note != "" {
+		msg += "。" + note
 	}
-
-	oci.InvalidateProfileCache(profile.ID)
-	storage.LogAudit("IMPORT_PROFILE", profileName, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Imported profile %s (%s)", profileName, region), "SUCCESS")
-
-	// Trigger initial account health check
-	health, _ := oci.CheckSingleAccountHealth(c.Request.Context(), &profile)
+	if health != nil && !health.IsHealthy {
+		msg += "。连通性检查未通过：" + health.Message
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "OCI Profile 导入成功！",
+		"message": msg,
 		"profile": profile,
 		"health":  health,
 	})
@@ -247,7 +367,13 @@ func UpdateProfile(c *gin.Context) {
 		"notes": req.Notes,
 	}
 	if req.AccountTypeOverride != "" {
-		updates["account_type_override"] = req.AccountTypeOverride
+		switch strings.ToLower(req.AccountTypeOverride) {
+		case "auto", "free", "payg":
+			updates["account_type_override"] = strings.ToLower(req.AccountTypeOverride)
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{"error": "account_type_override 只能是 auto / free / payg"})
+			return
+		}
 	}
 
 	storage.DB.Model(&profile).Updates(updates)
@@ -258,30 +384,36 @@ func UpdateProfile(c *gin.Context) {
 	})
 }
 
-// DeleteProfile deletes a profile
+// DeleteProfile stops the profile's tasks and deletes the profile
 func DeleteProfile(c *gin.Context) {
-	id := c.Param("id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromParam(c)
+	if !ok {
 		return
 	}
+
+	// Workers must not keep launching with credentials that no longer exist
+	var running []storage.LaunchTask
+	storage.DB.Where("profile_id = ? AND status = ?", profile.ID, "running").Find(&running)
+	for _, t := range running {
+		engine.StopTask(t.ID)
+	}
+	storage.DB.Model(&storage.LaunchTask{}).
+		Where("profile_id = ? AND status = ?", profile.ID, "stopped").
+		Update("last_message", "关联账号已删除，任务停止")
 
 	oci.InvalidateProfileCache(profile.ID)
 	storage.DB.Delete(&profile)
 
-	storage.LogAudit("DELETE_PROFILE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Deleted profile ID %s", id), "SUCCESS")
+	storage.LogAudit("DELETE_PROFILE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Deleted profile ID %d (%d running tasks stopped)", profile.ID, len(running)), "SUCCESS")
 
 	c.JSON(http.StatusOK, gin.H{"message": "Profile 已删除"})
 }
 
-// CheckSingleHealth executes single-account health inspection
+// CheckSingleHealth executes a single-account health inspection
 // STRICT REQUIREMENT: Only single account, no batch!
 func CheckSingleHealth(c *gin.Context) {
-	id := c.Param("id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, id).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromParam(c)
+	if !ok {
 		return
 	}
 
@@ -296,44 +428,63 @@ func CheckSingleHealth(c *gin.Context) {
 	})
 }
 
-// SyncLocalProfiles imports profiles from local ~/.oci/config if present
+// SyncLocalProfiles imports every profile of the host's ~/.oci/config (mounted read-only into the container)
 func SyncLocalProfiles(c *gin.Context) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot find user home directory"})
-		return
+	var configPath string
+	for _, dir := range allowedKeyDirs() {
+		candidate := filepath.Join(dir, "config")
+		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() {
+			configPath = candidate
+			break
+		}
 	}
-
-	configPath := filepath.Join(home, ".oci", "config")
-	data, err := os.ReadFile(configPath)
-	if err != nil {
+	if configPath == "" {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "宿主机 ~/.oci/config 文件不存在，无需同步",
+			"message": "宿主机 ~/.oci/config 不存在，没有可同步的账号",
 			"count":   0,
 		})
 		return
 	}
 
-	// Read and split profiles by sections
-	rawText := string(data)
-	sections := strings.Split(rawText, "[")
-	importedCount := 0
-
-	for _, sec := range sections {
-		if strings.TrimSpace(sec) == "" {
-			continue
-		}
-		fullSec := "[" + sec
-		// Parse single section
-		var req ImportRawProfileRequest
-		req.RawConfig = fullSec
-		// Pass to internal import logic
-		// (Simplified invocation)
-		importedCount++
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "无法读取 " + configPath + ": " + err.Error()})
+		return
 	}
 
+	sections := parseOCIConfig(string(data))
+	imported := 0
+	var problems []string
+	for _, section := range sections {
+		if section.KeyFile == "" {
+			problems = append(problems, fmt.Sprintf("[%s] 缺少 key_file", section.Name))
+			continue
+		}
+		keyPath := section.KeyFile
+		if !filepath.IsAbs(keyPath) && !strings.HasPrefix(keyPath, "~") {
+			keyPath = filepath.Join(filepath.Dir(configPath), keyPath)
+		}
+		pemContent, err := readKeyFile(keyPath)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("[%s] %v", section.Name, err))
+			continue
+		}
+		if _, _, err := upsertProfile(section, pemContent, "", ""); err != nil {
+			problems = append(problems, fmt.Sprintf("[%s] %v", section.Name, err))
+			continue
+		}
+		imported++
+	}
+
+	storage.LogAudit("SYNC_LOCAL_PROFILES", "admin", c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Synced %d profiles from %s", imported, configPath), "SUCCESS")
+
+	msg := fmt.Sprintf("已从 %s 同步 %d 个账号", configPath, imported)
+	if len(problems) > 0 {
+		msg += "；跳过：" + strings.Join(problems, "；")
+	}
 	c.JSON(http.StatusOK, gin.H{
-		"message": fmt.Sprintf("检测到宿主机配置文件，已解析并同步"),
-		"count":   importedCount,
+		"message":  msg,
+		"count":    imported,
+		"problems": problems,
 	})
 }

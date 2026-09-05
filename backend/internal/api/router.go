@@ -1,12 +1,36 @@
 package api
 
 import (
+	"log"
+	"os"
+	"strings"
+
 	"oci-panel/internal/auth"
 	"oci-panel/internal/config"
 	"oci-panel/internal/security"
 
 	"github.com/gin-gonic/gin"
 )
+
+// trustedProxyCIDRs returns the proxies whose forwarded-IP headers are believed.
+// Default: the private ranges Docker networks use (the nginx container in docker-compose).
+// Override with TRUSTED_PROXIES="cidr,cidr" or set it to "none" when the backend is reached directly.
+func trustedProxyCIDRs() []string {
+	raw := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES"))
+	if strings.EqualFold(raw, "none") {
+		return nil
+	}
+	if raw == "" {
+		return []string{"127.0.0.1/32", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	}
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func SetupRouter() *gin.Engine {
 	if config.GlobalConfig.AppEnv == "production" {
@@ -15,6 +39,13 @@ func SetupRouter() *gin.Engine {
 
 	r := gin.New()
 	r.Use(gin.Recovery())
+
+	// Client IP: only X-Real-IP (which nginx overwrites with the real peer address) from trusted
+	// proxies. X-Forwarded-For is deliberately ignored because clients can prepend their own value.
+	r.RemoteIPHeaders = []string{"X-Real-IP"}
+	if err := r.SetTrustedProxies(trustedProxyCIDRs()); err != nil {
+		log.Printf("[Router] invalid TRUSTED_PROXIES: %v", err)
+	}
 
 	// Security & Anti-Scan Middlewares
 	r.Use(security.SecurityHeadersMiddleware())
@@ -87,6 +118,7 @@ func SetupRouter() *gin.Engine {
 			// Network & Firewall
 			protected.GET("/network/vcns", ListVCNs)
 			protected.GET("/network/subnets", ListSubnets)
+			protected.GET("/network/ads", ListAvailabilityDomains)
 			protected.POST("/network/create-default-vcn", CreateDefaultVCN)
 			protected.GET("/network/security-rules", ListSecurityRules)
 			protected.POST("/network/allow-all", AllowAllFirewall)
@@ -107,11 +139,12 @@ func SetupRouter() *gin.Engine {
 			protected.GET("/audit-logs", GetAuditLogs)
 			protected.GET("/settings", GetSettings)
 			protected.POST("/settings/save", SaveSetting)
+			protected.POST("/settings/test-telegram", TestTelegram)
 		}
 	}
 
-	// WebSocket Log Streaming
-	r.GET("/ws/logs/:task_id", HandleTaskLogWS)
+	// WebSocket log streaming: same session cookie as the API (sent with the upgrade request)
+	r.GET("/ws/logs/:task_id", auth.RequireAuth(), HandleTaskLogWS)
 
 	return r
 }

@@ -52,10 +52,8 @@ type UpdateTagsRequest struct {
 
 // ListInstances lists all compute instances with VNIC details and root password tag
 func ListInstances(c *gin.Context) {
-	profileID := c.Query("profile_id")
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, profileID).Error; err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Profile not found"})
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 
