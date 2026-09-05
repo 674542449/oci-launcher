@@ -44,7 +44,9 @@ type CreateTaskRequest struct {
 
 const (
 	accountLockHandlerTTL = 2 * time.Minute
-	firstAttemptTimeout   = 150 * time.Second
+	// The synchronous run must answer within Cloudflare's 100 s limit: attempts get 70 s, and a
+	// lost response is settled by the 15 s by-name confirmation inside AttemptLaunch.
+	firstAttemptTimeout = 70 * time.Second
 )
 
 // updateTask writes fields of one task by id and logs (instead of silently dropping) DB errors.
@@ -86,7 +88,7 @@ func acquireLockOrReject(c *gin.Context, profileID uint) bool {
 func ListTasks(c *gin.Context) {
 	var tasks []storage.LaunchTask
 
-	// A synchronous first attempt is capped at firstAttemptTimeout (150 s); anything still
+	// A synchronous first attempt is capped at firstAttemptTimeout (70 s); anything still
 	// "creating" after 3 minutes was interrupted (restart, crash) and must not look alive.
 	storage.DB.Model(&storage.LaunchTask{}).
 		Where("status = ? AND updated_at < ?", "creating", time.Now().Add(-3*time.Minute)).
@@ -311,7 +313,7 @@ func CreateTask(c *gin.Context) {
 
 	reason := last.Reason
 	if last.Category == engine.CategoryCancelled {
-		reason = "创建请求超时，请重试"
+		reason = "创建请求超时，且云端暂未查到该实例，请重试（若稍后在「实例」页看到它，重试会自动识别为已创建）"
 	}
 	updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建失败: " + reason + "（未排队）"})
 	task.Status, task.LastMessage = "stopped", "创建失败: "+reason+"（未排队）"

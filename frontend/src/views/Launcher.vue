@@ -591,6 +591,10 @@ const askAutoRetry = (res: any) => {
 
 const submitTask = async (submittedName: string) => {
   launching.value = true
+  // The record exists a moment after the request starts: show it while OCI is working.
+  window.setTimeout(() => {
+    if (launching.value) fetchTasks()
+  }, 3000)
   try {
     const res: any = await api.post(
       '/tasks/create',
@@ -614,6 +618,11 @@ const submitTask = async (submittedName: string) => {
       },
       { timeout: 200000 },
     )
+    // The response settles this task; polling must not announce it a second time.
+    if (watchedTaskId.value === res.task_id) {
+      watchedTaskId.value = ''
+      watchedPrevStatus.value = ''
+    }
     await fetchTasks()
 
     if (res.result === 'created') {
@@ -630,7 +639,13 @@ const submitTask = async (submittedName: string) => {
       dialog.error({ title: '创建失败', content: res.reason || '未知错误', positiveText: '知道了' })
     }
   } catch (e: any) {
-    message.error(e.message)
+    // No answer (timeout, proxy limit): the backend keeps going and writes the result to the
+    // record; polling picks it up and announces it here.
+    dialog.warning({
+      title: '暂未收到创建结果',
+      content: `与服务器的连接超时（${e.message}）。创建可能仍在后台进行，本页会持续刷新并提示结果，也可到「实例」页查看。`,
+      positiveText: '知道了',
+    })
     fetchTasks()
   } finally {
     launching.value = false
@@ -696,7 +711,7 @@ const handleCreateTask = () => {
 const startPolling = () => {
   if (pollTimer) window.clearInterval(pollTimer)
   pollTimer = window.setInterval(() => {
-    if (tasks.value.some(isActiveTask)) fetchTasks()
+    if (launching.value || tasks.value.some(isActiveTask)) fetchTasks()
   }, 10000)
 }
 

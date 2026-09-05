@@ -40,6 +40,12 @@ const (
 	instanceReadyInterval = 10 * time.Second
 	// AddressWatchTimeout bounds one background FinalizeSuccess run.
 	AddressWatchTimeout = 6 * time.Minute
+	// launchCallTimeout caps one LaunchInstance call (including its in-call retries). OCI
+	// normally answers within seconds; a call that runs longer has most likely lost its
+	// response, and the instance is then confirmed by name instead of waited for.
+	launchCallTimeout = 55 * time.Second
+	// existenceCheckTimeout bounds the by-name lookup after an unknown-outcome error.
+	existenceCheckTimeout = 15 * time.Second
 )
 
 // AttemptResult is the outcome of one LaunchInstance attempt.
@@ -178,8 +184,43 @@ func findExistingInstance(ctx context.Context, profile *storage.OCIProfile, task
 	return "", false
 }
 
+// outcomeUnknown tells whether a LaunchInstance error leaves open the possibility that the
+// instance was created anyway: timeouts, cancellation, transport errors and gateway-style 5xx.
+// Capacity (500 "out of host capacity"), 4xx and 429 are definite answers.
+func outcomeUnknown(err error) bool {
+	if err == nil {
+		return true // no error but no OCID either: look it up
+	}
+	if se, ok := common.IsServiceError(err); ok {
+		code := se.GetHTTPStatusCode()
+		if code == 500 && oci.IsCapacityMessage(se.GetMessage()) {
+			return false
+		}
+		return code >= 500 && code != 501
+	}
+	return true
+}
+
+// confirmLaunchedInstance looks the task's instance up by name on a fresh context after an
+// unknown-outcome error, so a lost response never turns a created instance into a failure.
+// Up to three lookups a few seconds apart, because the record appears once OCI is done.
+func confirmLaunchedInstance(profile *storage.OCIProfile, task *storage.LaunchTask) (string, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), existenceCheckTimeout)
+	defer cancel()
+	for i := 0; ; i++ {
+		if ocid, found := findExistingInstance(ctx, profile, task); found {
+			return ocid, true
+		}
+		if i >= 2 || !sleepCtx(ctx, 5*time.Second) {
+			return "", false
+		}
+	}
+}
+
 // AttemptLaunch performs one LaunchInstance attempt (after the same-name idempotency check),
 // persists the attempt row and publishes a live-log line. It does not change the task status.
+// The success criterion is an instance OCID: returned by the call, or confirmed by name when
+// the call's outcome was unknown.
 func AttemptLaunch(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, targetAD string, attemptNum int, rootPassword string) AttemptResult {
 	res := AttemptResult{AD: targetAD}
 
@@ -195,9 +236,20 @@ func AttemptLaunch(ctx context.Context, profile *storage.OCIProfile, task *stora
 	launchTask := *task
 	launchTask.RootPasswordEnc = rootPassword
 	start := time.Now()
-	instanceOCID, launchErr := oci.LaunchInstance(ctx, profile, &launchTask, targetAD)
+	launchCtx, cancelLaunch := context.WithTimeout(ctx, launchCallTimeout)
+	instanceOCID, launchErr := oci.LaunchInstance(launchCtx, profile, &launchTask, targetAD)
+	cancelLaunch()
 	res.DurationMs = time.Since(start).Milliseconds()
-	if ctx.Err() != nil {
+
+	confirmed := false
+	if (launchErr != nil || instanceOCID == "") && outcomeUnknown(launchErr) {
+		if ocid, found := confirmLaunchedInstance(profile, task); found {
+			instanceOCID, launchErr, confirmed = ocid, nil, true
+		} else if launchErr == nil {
+			launchErr = fmt.Errorf("LaunchInstance 未返回实例 OCID")
+		}
+	}
+	if launchErr != nil && ctx.Err() != nil {
 		res.Category = CategoryCancelled
 		return res
 	}
@@ -210,8 +262,14 @@ func AttemptLaunch(ctx context.Context, profile *storage.OCIProfile, task *stora
 
 	if launchErr == nil && instanceOCID != "" {
 		res.Success, res.InstanceOCID = true, instanceOCID
-		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "success", "创建实例成功 (Instance Launched)", res.DurationMs)
-		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "SUCCESS", "实例创建成功（已返回实例 OCID），正在获取公网 IP…", res.DurationMs)
+		attemptMsg := "创建实例成功 (Instance Launched)"
+		logMsg := "实例创建成功（已返回实例 OCID），正在获取公网 IP…"
+		if confirmed {
+			attemptMsg = "请求未收到响应，但已在云端按实例名确认创建成功"
+			logMsg = "请求未收到响应，已在云端确认实例存在，视为创建成功，正在获取公网 IP…"
+		}
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "success", attemptMsg, res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "SUCCESS", logMsg, res.DurationMs)
 		return res
 	}
 
