@@ -54,6 +54,19 @@ if ! docker compose version &> /dev/null; then
   apt-get install -y docker-compose-plugin
 fi
 
+# Ensure project files are present (handles pipe execution: curl ... | bash)
+if [ ! -f "docker-compose.yml" ]; then
+  INSTALL_DIR="/opt/oci-launcher"
+  echo -e "${BLUE}正在从 GitHub 克隆源码至 ${INSTALL_DIR}...${NC}"
+  if [ -d "$INSTALL_DIR" ]; then
+    cd "$INSTALL_DIR"
+    git pull || true
+  else
+    git clone https://github.com/674542449/oci-launcher.git "$INSTALL_DIR"
+    cd "$INSTALL_DIR"
+  fi
+fi
+
 # 5. Generate Random Secrets for .env
 echo -e "${BLUE}[4/5] 正在生成高熵加密密钥与环境配置...${NC}"
 PROJECT_DIR=$(pwd)
