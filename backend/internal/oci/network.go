@@ -278,7 +278,7 @@ func ListSecurityRules(ctx context.Context, profile *storage.OCIProfile, region,
 	}
 
 	resp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
-	if err != nil || resp.SecurityList == nil {
+	if err != nil {
 		return nil, err
 	}
 
@@ -323,7 +323,7 @@ func AllowAllFirewallRules(ctx context.Context, profile *storage.OCIProfile, reg
 	}
 
 	getResp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
-	if err != nil || getResp.SecurityList == nil {
+	if err != nil {
 		return err
 	}
 
@@ -377,7 +377,7 @@ func AllowCloudflareCDNIPs(ctx context.Context, profile *storage.OCIProfile, reg
 	}
 
 	getResp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
-	if err != nil || getResp.SecurityList == nil {
+	if err != nil {
 		return err
 	}
 
