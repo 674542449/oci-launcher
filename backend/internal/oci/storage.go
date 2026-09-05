@@ -109,12 +109,12 @@ func ListBootVolumes(ctx context.Context, profile *storage.OCIProfile, region st
 			growCmds := fmt.Sprintf("# 适用于 Oracle Linux / Ubuntu (一键自动扩展磁盘分区):\nsudo oci-growfs -y || (sudo apt-get install -y cloud-guest-utils && sudo growpart /dev/sda 1 && sudo resize2fs /dev/sda1)")
 
 			items = append(items, BootVolumeItem{
-				OCID:         common.StringToEmptyString(bv.Id),
-				DisplayName:  common.StringToEmptyString(bv.DisplayName),
+				OCID:         StrVal(bv.Id),
+				DisplayName:  StrVal(bv.DisplayName),
 				SizeInGBs:    size,
 				VpusPerGB:    vpu,
 				State:        string(bv.LifecycleState),
-				AD:           common.StringToEmptyString(bv.AvailabilityDomain),
+				AD:           StrVal(bv.AvailabilityDomain),
 				TimeCreated:  timeStr,
 				GrowCommands: growCmds,
 			})
@@ -199,12 +199,12 @@ func ListBlockVolumes(ctx context.Context, profile *storage.OCIProfile, region s
 		}
 
 		items = append(items, BlockVolumeItem{
-			OCID:        common.StringToEmptyString(vol.Id),
-			DisplayName: common.StringToEmptyString(vol.DisplayName),
+			OCID:        StrVal(vol.Id),
+			DisplayName: StrVal(vol.DisplayName),
 			SizeInGBs:   size,
 			VpusPerGB:   vpu,
 			State:       string(vol.LifecycleState),
-			AD:          common.StringToEmptyString(vol.AvailabilityDomain),
+			AD:          StrVal(vol.AvailabilityDomain),
 			TimeCreated: timeStr,
 		})
 	}
@@ -265,7 +265,7 @@ func ListBuckets(ctx context.Context, profile *storage.OCIProfile, region string
 			timeStr = b.TimeCreated.Format("2006-01-02 15:04:05")
 		}
 		items = append(items, BucketItem{
-			Name:        common.StringToEmptyString(b.Name),
+			Name:        StrVal(b.Name),
 			Namespace:   namespace,
 			TimeCreated: timeStr,
 		})
