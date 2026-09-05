@@ -73,6 +73,7 @@ import {
 } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
+import { regionLabel } from '@/lib/regions'
 
 const route = useRoute()
 const router = useRouter()
@@ -85,7 +86,7 @@ const isLoginPage = computed(() => route.path === '/login')
 
 const navItems = [
   { title: '额度仪表盘', path: '/', icon: SpeedometerOutline },
-  { title: '抢机任务', path: '/launcher', icon: RocketOutline },
+  { title: '创建实例', path: '/launcher', icon: RocketOutline },
   { title: '实例', path: '/instances', icon: ServerOutline },
   { title: '存储', path: '/storage', icon: LayersOutline },
   { title: '防火墙', path: '/firewall', icon: ShieldCheckmarkOutline },
@@ -94,7 +95,7 @@ const navItems = [
 ]
 
 const profileOptions = computed(() =>
-  profileStore.profiles.map((p) => ({ label: `${p.name} · ${p.region}`, value: p.id })),
+  profileStore.profiles.map((p) => ({ label: `${p.name} · ${regionLabel(p.region)}`, value: p.id })),
 )
 const activeProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 

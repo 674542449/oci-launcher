@@ -8,7 +8,7 @@
         </n-button>
         <n-button type="primary" :disabled="!currentProfile" @click="$router.push('/launcher')">
           <template #icon><n-icon><RocketOutline /></n-icon></template>
-          去抢机
+          创建实例
         </n-button>
       </template>
     </PageHeader>
@@ -125,9 +125,9 @@
             </div>
             <dl class="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-3">
               <div class="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
-                <dt class="caption">API 判定结果</dt>
-                <dd class="mono mt-0.5 text-[15px] font-semibold text-ink">{{ quota.account_type.detected_type || 'UNKNOWN' }}</dd>
-                <dd class="caption mt-0.5">OneSubscription 订阅模型</dd>
+                <dt class="caption">账号判定结果</dt>
+                <dd class="mono mt-0.5 text-[15px] font-semibold text-ink">{{ detectedLabel }}</dd>
+                <dd class="caption mt-0.5">{{ quota.account_type.detection_source === 'subscription' ? '来源：Organizations 订阅接口' : quota.account_type.detection_source === 'limits' ? '来源：服务限额推断（订阅接口不可用）' : '来源：未知' }}</dd>
               </div>
               <div class="rounded-lg border border-line bg-surface-2 px-3.5 py-3">
                 <dt class="caption">A1 核心限额</dt>
@@ -195,6 +195,13 @@ const overrideOptions = [
 ]
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
+
+const detectedLabel = computed(() => {
+  const t = quota.value?.account_type?.detected_type
+  if (t === 'PAYG') return '已升级 (PAYG)'
+  if (t === 'FREE_TIER') return '免费号 (Free Tier)'
+  return '未能判定'
+})
 
 const profileStatusLabel = computed(() => {
   const s = currentProfile.value?.status

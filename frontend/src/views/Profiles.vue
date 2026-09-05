@@ -45,10 +45,25 @@
               <h2 class="truncate text-[15px] font-semibold text-ink">{{ p.name }}</h2>
               <span v-if="p.id === profileStore.activeProfileId" class="pill pill-info">当前</span>
             </div>
-            <div class="mono mt-0.5 text-xs text-ink-3">{{ p.region }}</div>
+            <div class="mt-0.5 text-xs text-ink-2">
+              {{ regionLabel(p.region) }}
+              <span class="mono text-ink-3">· {{ p.region }}</span>
+            </div>
           </div>
-          <StatusPill :state="p.status" :label="statusLabel(p.status)" />
+          <div class="flex shrink-0 flex-col items-end gap-1">
+            <StatusPill :state="p.status" :label="statusLabel(p.status)" />
+            <span class="pill" :class="accountTypeClass(p)" :title="p.detection_reason || ''">{{ accountTypeLabel(p) }}</span>
+          </div>
         </div>
+
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs leading-5">
+          <dt class="text-ink-3">邮箱</dt>
+          <dd class="mono truncate text-ink" :title="p.account_email">{{ p.account_email || '体检后自动获取' }}</dd>
+          <dt class="text-ink-3">注册</dt>
+          <dd class="mono text-ink">{{ formatDate(p.account_created_at) }}<span v-if="countryOf(p)" class="text-ink-3"> · {{ countryOf(p) }}</span></dd>
+          <dt v-if="p.tenancy_name" class="text-ink-3">租户</dt>
+          <dd v-if="p.tenancy_name" class="mono truncate text-ink" :title="p.tenancy_name">{{ p.tenancy_name }}</dd>
+        </dl>
 
         <div v-if="p.tags" class="flex flex-wrap gap-1.5">
           <span v-for="t in splitTags(p.tags)" :key="t" class="rounded-md border border-line bg-surface-2 px-2 py-0.5 text-xs text-ink-2">{{ t }}</span>
@@ -166,6 +181,7 @@ import { AddOutline, FolderOpenOutline, SearchOutline, InformationCircleOutline,
 import { useProfileStore } from '@/stores/profile'
 import type { OCIProfile } from '@/stores/profile'
 import { api } from '@/api/client'
+import { regionLabel, regionCountry, countryName } from '@/lib/regions'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -202,6 +218,28 @@ const filteredProfiles = computed(() => {
 })
 
 const statusLabel = (s: string) => (s === 'Active' ? '正常' : s === 'Banned' ? '疑似封号' : s === 'Invalid' ? '凭据无效' : s || '未知')
+
+// Account type as reported by the Organizations subscription API (or the manual override)
+const accountTypeLabel = (p: OCIProfile) => {
+  const o = (p.account_type_override || 'auto').toLowerCase()
+  if (o === 'payg') return '升级号 · 手动'
+  if (o === 'free') return '免费号 · 手动'
+  if (p.detected_type === 'PAYG') return '升级号'
+  if (p.detected_type === 'FREE_TIER') return '免费号'
+  return '类型未判定'
+}
+const accountTypeClass = (p: OCIProfile) => {
+  const o = (p.account_type_override || 'auto').toLowerCase()
+  const paid = o === 'payg' || (o === 'auto' && p.detected_type === 'PAYG')
+  const free = o === 'free' || (o === 'auto' && p.detected_type === 'FREE_TIER')
+  return paid ? 'pill-info' : free ? 'pill-ok' : 'pill-muted'
+}
+const countryOf = (p: OCIProfile) => countryName(p.country_code) || regionCountry(p.region)
+const formatDate = (t?: string | null) => {
+  if (!t) return '—'
+  const d = new Date(t)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleDateString('zh-CN')
+}
 const splitTags = (tags: string) => tags.split(',').map((t) => t.trim()).filter(Boolean)
 const maskOCID = (ocid?: string) => (!ocid || ocid.length < 20 ? ocid || '' : ocid.substring(0, 12) + '…' + ocid.substring(ocid.length - 8))
 

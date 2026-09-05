@@ -25,6 +25,7 @@ type AccountTypeInfo struct {
 	DetectedType    string `json:"detected_type"`    // FREE_TIER, PAYG, UNKNOWN
 	EffectiveType   string `json:"effective_type"`   // free or payg (after override)
 	DetectionReason string `json:"detection_reason"` // Transparent proof
+	DetectionSource string `json:"detection_source"` // subscription (Organizations API) or limits (fallback)
 	A1CoreLimit     int64  `json:"a1_core_limit"`
 	A1MemoryLimit   int64  `json:"a1_memory_limit"`
 }
@@ -182,24 +183,54 @@ func fetchA1Limits(ctx context.Context, profile *storage.OCIProfile, region stri
 	return coreLimit, memLimit, nil
 }
 
-// DetectAccountType classifies the tenancy from its A1 service limits (queried in the home region).
+// DetectAccountType classifies the tenancy. The account-level answer comes from the
+// Organizations subscription API (free promotion vs. paid subscription); the A1 service limit
+// is only consulted when that API is unavailable, and the source is reported either way.
 func DetectAccountType(ctx context.Context, profile *storage.OCIProfile, homeRegion string) (*AccountTypeInfo, error) {
 	info := &AccountTypeInfo{DetectedType: "UNKNOWN"}
 
-	coreLimit, memLimit, err := fetchA1Limits(ctx, profile, homeRegion)
-	if err != nil {
-		info.DetectionReason = fmt.Sprintf("服务限额查询失败，无法自动判定: %v", err)
-	} else {
+	// A1 limits are still reported for transparency (and as the fallback signal)
+	coreLimit, memLimit, limitsErr := fetchA1Limits(ctx, profile, homeRegion)
+	if limitsErr == nil {
 		info.A1CoreLimit = coreLimit
 		info.A1MemoryLimit = memLimit
-		if coreLimit > paygA1CoreLimitHint {
+	}
+
+	verdict, subErr := DetectAccountTypeBySubscription(ctx, profile, homeRegion)
+	switch {
+	case subErr == nil && verdict != nil && verdict.Decided:
+		info.DetectionSource = "subscription"
+		if verdict.IsPaid {
 			info.DetectedType = "PAYG"
-			info.DetectionReason = fmt.Sprintf("服务限额 standard-a1-core-count = %d（大于 %d，判定为已升级 PAYG）", coreLimit, paygA1CoreLimitHint)
 		} else {
 			info.DetectedType = "FREE_TIER"
-			info.DetectionReason = fmt.Sprintf("服务限额 standard-a1-core-count = %d（不超过 %d，判定为 Always Free）", coreLimit, paygA1CoreLimitHint)
+		}
+		info.DetectionReason = verdict.Reason
+	default:
+		info.DetectionSource = "limits"
+		why := "订阅接口未能判定"
+		if subErr != nil {
+			why = "订阅接口不可用 (" + subErr.Error() + ")"
+		} else if verdict != nil && !verdict.Found {
+			why = "订阅接口未返回订阅"
+		}
+		if limitsErr != nil {
+			info.DetectionReason = fmt.Sprintf("%s；服务限额查询也失败，无法自动判定: %v。可手动覆盖账号类型", why, limitsErr)
+		} else if coreLimit > paygA1CoreLimitHint {
+			info.DetectedType = "PAYG"
+			info.DetectionReason = fmt.Sprintf("%s；按服务限额推断: standard-a1-core-count = %d（大于 %d，判定为已升级 PAYG）", why, coreLimit, paygA1CoreLimitHint)
+		} else {
+			info.DetectedType = "FREE_TIER"
+			info.DetectionReason = fmt.Sprintf("%s；按服务限额推断: standard-a1-core-count = %d（不超过 %d，判定为 Always Free）", why, coreLimit, paygA1CoreLimitHint)
 		}
 	}
+
+	// Persist for the account list
+	storage.DB.Model(profile).Updates(map[string]interface{}{
+		"detected_type":    info.DetectedType,
+		"detection_reason": info.DetectionReason,
+		"detection_source": info.DetectionSource,
+	})
 
 	override := strings.ToLower(profile.AccountTypeOverride)
 	switch override {

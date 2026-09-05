@@ -69,6 +69,9 @@ func CheckSingleAccountHealth(ctx context.Context, profile *storage.OCIProfile) 
 		"status_message": msg,
 	})
 
+	// Email, registration time, tenancy name, country and subscription verdict for the account list
+	EnrichProfileIdentity(ctx, profile)
+
 	result.Status = "Active"
 	result.IsHealthy = true
 	result.Message = msg

@@ -12,6 +12,11 @@ export interface OCIProfile {
   account_type_override: string
   detected_type: string
   detection_reason: string
+  detection_source?: string
+  account_email?: string
+  account_created_at?: string | null
+  tenancy_name?: string
+  country_code?: string
   status: string
   status_message: string
   tags: string

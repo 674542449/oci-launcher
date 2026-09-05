@@ -219,11 +219,17 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		return "", "", nil, err
 	}
 
+	// Names follow the OCI console's own convention (vcn-YYYYMMDD-HHMM and friends)
+	stamp := time.Now().Format("20060102-1504")
+	vcnName := "vcn-" + stamp
+	igwName := "Internet gateway-" + vcnName
+	subnetName := "public subnet-" + vcnName
+
 	// 1. VCN with an Oracle-allocated IPv6 GUA /56
 	vcnResp, err := netClient.CreateVcn(ctx, core.CreateVcnRequest{
 		CreateVcnDetails: core.CreateVcnDetails{
 			CompartmentId:                common.String(profile.TenancyOCID),
-			DisplayName:                  common.String("oci-panel-default-vcn"),
+			DisplayName:                  common.String(vcnName),
 			CidrBlock:                    common.String("10.0.0.0/16"),
 			IsIpv6Enabled:                common.Bool(true),
 			IsOracleGuaAllocationEnabled: common.Bool(true),
@@ -235,7 +241,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		vcnResp, err = netClient.CreateVcn(ctx, core.CreateVcnRequest{
 			CreateVcnDetails: core.CreateVcnDetails{
 				CompartmentId: common.String(profile.TenancyOCID),
-				DisplayName:   common.String("oci-panel-default-vcn"),
+				DisplayName:   common.String(vcnName),
 				CidrBlock:     common.String("10.0.0.0/16"),
 			},
 		})
@@ -265,7 +271,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		CreateInternetGatewayDetails: core.CreateInternetGatewayDetails{
 			CompartmentId: common.String(profile.TenancyOCID),
 			VcnId:         common.String(vcnID),
-			DisplayName:   common.String("oci-panel-igw"),
+			DisplayName:   common.String(igwName),
 			IsEnabled:     common.Bool(true),
 		},
 	})
@@ -370,7 +376,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 	subnetDetails := core.CreateSubnetDetails{
 		CompartmentId:   common.String(profile.TenancyOCID),
 		VcnId:           common.String(vcnID),
-		DisplayName:     common.String("oci-panel-default-subnet"),
+		DisplayName:     common.String(subnetName),
 		CidrBlock:       common.String("10.0.0.0/24"),
 		RouteTableId:    vcn.DefaultRouteTableId,
 		SecurityListIds: []string{StrVal(vcn.DefaultSecurityListId)},

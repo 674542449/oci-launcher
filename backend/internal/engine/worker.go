@@ -33,10 +33,28 @@ type LiveLogMessage struct {
 }
 
 const (
-	maxBackoffFactor      = 16
+	retryWaitMinSecs      = 60
+	retryWaitMaxSecs      = 180
+	maxBackoffFactor      = 8
 	instanceReadyTimeout  = 5 * time.Minute
 	instanceReadyInterval = 10 * time.Second
 )
+
+// AttemptResult is the outcome of one LaunchInstance attempt.
+type AttemptResult struct {
+	Success        bool
+	AlreadyExisted bool
+	InstanceOCID   string
+	Category       ErrorCategory
+	Reason         string
+	DurationMs     int64
+	AD             string
+}
+
+// Retryable reports whether the failure is worth another attempt later.
+func (r AttemptResult) Retryable() bool {
+	return !r.Success && (r.Category == CategoryCapacityFull || r.Category == CategoryRateLimited || r.Category == CategoryTransient)
+}
 
 // ParseADList tolerates the JSON array stored by the API as well as legacy comma-separated
 // values; "null", "[]" and blanks mean "no preference" (rotate through every AD of the region).
@@ -59,6 +77,21 @@ func ParseADList(raw string) []string {
 	return out
 }
 
+// ResolveADList returns the task's AD preference, or every AD of the region when unset.
+func ResolveADList(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask) ([]string, error) {
+	if adList := ParseADList(task.ADList); len(adList) > 0 {
+		return adList, nil
+	}
+	names, err := oci.ListAvailabilityDomainNames(ctx, profile, task.Region)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
+		return nil, fmt.Errorf("region %s has no availability domains", task.Region)
+	}
+	return names, nil
+}
+
 // DecryptTaskRootPassword returns the plaintext root password of a task. Older rows may still
 // hold the raw value, which is returned unchanged when decryption fails.
 func DecryptTaskRootPassword(enc string) string {
@@ -69,6 +102,21 @@ func DecryptTaskRootPassword(enc string) string {
 		return plain
 	}
 	return enc
+}
+
+// RandomRetryWait returns the pause between queued attempts: 60-180 s, uniformly random.
+func RandomRetryWait() time.Duration {
+	return time.Duration(retryWaitMinSecs+rand.Intn(retryWaitMaxSecs-retryWaitMinSecs+1)) * time.Second
+}
+
+var (
+	nameAdjectives = []string{"amber", "brisk", "calm", "coral", "crisp", "dusk", "ember", "fern", "frost", "gale", "glen", "hazel", "ivory", "jade", "lunar", "maple", "misty", "nova", "ocean", "onyx", "opal", "pearl", "pine", "quiet", "river", "sage", "slate", "solar", "storm", "swift", "terra", "tidal", "vivid", "willow", "zephyr"}
+	nameNouns      = []string{"atlas", "beacon", "cedar", "comet", "delta", "falcon", "harbor", "heron", "iris", "kestrel", "lantern", "lotus", "meadow", "nimbus", "orbit", "osprey", "pixel", "quartz", "ridge", "sparrow", "summit", "tundra", "vector", "vertex", "voyager", "willet", "zenith"}
+)
+
+// RandomInstanceName produces a project-style name such as "amber-falcon-42".
+func RandomInstanceName() string {
+	return fmt.Sprintf("%s-%s-%02d", nameAdjectives[rand.Intn(len(nameAdjectives))], nameNouns[rand.Intn(len(nameNouns))], rand.Intn(100))
 }
 
 // sleepCtx waits for d unless the context is cancelled first (returns false in that case).
@@ -84,14 +132,6 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
-}
-
-func lockTTL(intervalSecs int) time.Duration {
-	ttl := time.Duration(intervalSecs)*2*time.Second + 60*time.Second
-	if ttl < 2*time.Minute {
-		ttl = 2 * time.Minute
-	}
-	return ttl
 }
 
 func recordAttempt(taskID uuid.UUID, num int, region, ad, status, msg string, durationMs int64) {
@@ -112,6 +152,92 @@ func setTaskStatus(taskID uuid.UUID, status, message string) {
 		"status":       status,
 		"last_message": message,
 	})
+}
+
+// findExistingInstance looks for a live instance with the task's display name (idempotency).
+func findExistingInstance(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask) (string, bool) {
+	computeClient, err := oci.GetComputeClient(profile, task.Region)
+	if err != nil {
+		return "", false
+	}
+	resp, err := computeClient.ListInstances(ctx, core.ListInstancesRequest{
+		CompartmentId: common.String(profile.TenancyOCID),
+		DisplayName:   common.String(task.InstanceName),
+	})
+	if err != nil {
+		return "", false
+	}
+	for _, inst := range resp.Items {
+		if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
+			continue
+		}
+		return oci.StrVal(inst.Id), true
+	}
+	return "", false
+}
+
+// AttemptLaunch performs one LaunchInstance attempt (after the same-name idempotency check),
+// persists the attempt row and publishes a live-log line. It does not change the task status.
+func AttemptLaunch(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, targetAD string, attemptNum int, rootPassword string) AttemptResult {
+	res := AttemptResult{AD: targetAD}
+
+	if ocid, found := findExistingInstance(ctx, profile, task); found {
+		res.Success, res.AlreadyExisted, res.InstanceOCID = true, true, ocid
+		return res
+	}
+	if ctx.Err() != nil {
+		res.Category = CategoryCancelled
+		return res
+	}
+
+	launchTask := *task
+	launchTask.RootPasswordEnc = rootPassword
+	start := time.Now()
+	instanceOCID, launchErr := oci.LaunchInstance(ctx, profile, &launchTask, targetAD)
+	res.DurationMs = time.Since(start).Milliseconds()
+	if ctx.Err() != nil {
+		res.Category = CategoryCancelled
+		return res
+	}
+
+	now := time.Now()
+	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"current_retries": attemptNum,
+		"last_attempt_at": &now,
+	})
+
+	if launchErr == nil && instanceOCID != "" {
+		res.Success, res.InstanceOCID = true, instanceOCID
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "success", "创建实例成功 (Instance Launched)", res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "SUCCESS", "实例创建成功，正在等待网络就绪…", res.DurationMs)
+		return res
+	}
+
+	res.Category, res.Reason = ClassifyError(launchErr)
+	switch res.Category {
+	case CategoryCancelled:
+		return res
+	case CategoryFatalError:
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "fatal_error", res.Reason, res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "FATAL", "配置或凭据错误: "+res.Reason, res.DurationMs)
+	case CategoryRateLimited:
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "rate_limited", res.Reason, res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "RATE_LIMIT", res.Reason, res.DurationMs)
+	case CategoryTransient:
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "transient_error", res.Reason, res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "RETRY", res.Reason, res.DurationMs)
+	default:
+		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "capacity_full", res.Reason, res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "RETRY", fmt.Sprintf("%s（可用区 %s）", res.Reason, shortAD(targetAD)), res.DurationMs)
+	}
+	return res
+}
+
+func shortAD(ad string) string {
+	if i := strings.Index(ad, ":"); i >= 0 {
+		return ad[i+1:]
+	}
+	return ad
 }
 
 // waitForInstanceAddresses polls until the instance is RUNNING and its primary VNIC has the
@@ -135,7 +261,37 @@ func waitForInstanceAddresses(ctx context.Context, profile *storage.OCIProfile, 
 	}
 }
 
-// RunTaskWorker runs the retry loop of one launch task until it succeeds, fails or is stopped.
+// FinalizeSuccess waits for the new instance's network, stores the result on the task and
+// sends the success notification. Safe to run in its own goroutine with a background context.
+func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, res AttemptResult, attemptNum int, rootPassword string) {
+	state, pubIP, ipv6 := waitForInstanceAddresses(ctx, profile, task.Region, res.InstanceOCID, task.AssignPublicIP)
+	if ctx.Err() != nil {
+		return
+	}
+
+	msg := "实例创建成功"
+	if res.AlreadyExisted {
+		msg = "检测到云端已存在同名实例，视为创建成功"
+	}
+	if pubIP != "" {
+		msg += "，公网 IP " + pubIP
+	} else if state != "" {
+		msg += fmt.Sprintf("，实例状态 %s，公网 IP 尚未就绪", state)
+	}
+
+	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"status":                "success",
+		"success_instance_ocid": res.InstanceOCID,
+		"success_public_ip":     pubIP,
+		"success_ipv6":          ipv6,
+		"last_message":          msg,
+	})
+	emitLog(task.ID.String(), attemptNum, task.Region, res.AD, "SUCCESS", fmt.Sprintf("%s。实例 OCID: %s", msg, res.InstanceOCID), 0)
+	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword)
+}
+
+// RunTaskWorker is the queued retry loop: it keeps attempting LaunchInstance, rotating through
+// the availability domains, until it succeeds, hits a fatal error or is stopped.
 func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 	log.Printf("[Engine] Starting worker for task: %s", taskID)
 
@@ -147,7 +303,6 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 
 	var profile storage.OCIProfile
 	if err := storage.DB.First(&profile, "id = ?", task.ProfileID).Error; err != nil {
-		log.Printf("[Engine] Profile %d for task %s not found", task.ProfileID, taskID)
 		setTaskStatus(taskID, "failed", "关联的 OCI 账号不存在")
 		return
 	}
@@ -165,26 +320,16 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 		}
 	}()
 
-	// Availability domains: user selection, otherwise every AD of the target region
-	adList := ParseADList(task.ADList)
-	if len(adList) == 0 {
-		names, err := oci.ListAvailabilityDomainNames(ctx, &profile, task.Region)
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			setTaskStatus(taskID, "failed", "无法获取可用区列表: "+err.Error())
+	adList, err := ResolveADList(ctx, &profile, &task)
+	if err != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		adList = names
-	}
-	if len(adList) == 0 {
-		setTaskStatus(taskID, "failed", "未找到可用区 (AD)，请检查区域配置")
+		setTaskStatus(taskID, "failed", "无法获取可用区列表: "+err.Error())
 		return
 	}
 
 	rootPassword := DecryptTaskRootPassword(task.RootPasswordEnc)
-
 	currentADIndex := 0
 	backoffFactor := 1
 
@@ -205,159 +350,67 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 			return
 		}
 
-		interval := currentTask.RetryIntervalSecs
-		if interval <= 0 {
-			interval = 60
-		}
-
 		// One OCI account operated at a time: take (or refresh) the global lock
-		if ok, lockedBy, err := cache.AcquireAccountLock(ctx, profile.ID, lockTTL(interval)); err != nil {
+		if ok, lockedBy, err := cache.AcquireAccountLock(ctx, profile.ID, time.Duration(retryWaitMaxSecs*2)*time.Second); err != nil {
 			log.Printf("[Engine] Task %s: account lock error: %v", taskID, err)
 		} else if !ok {
-			emitLog(ctx, taskID.String(), currentTask.CurrentRetries, task.Region, "", "WAIT",
-				fmt.Sprintf("等待账号并发锁：账号 ID %s 正在操作中，%d 秒后再试", lockedBy, interval), 0)
-			if !sleepCtx(ctx, time.Duration(interval)*time.Second) {
+			wait := RandomRetryWait()
+			emitLog(taskID.String(), currentTask.CurrentRetries, task.Region, "", "WAIT",
+				fmt.Sprintf("等待账号并发锁：账号 ID %s 正在操作中，%d 秒后再试", lockedBy, int(wait.Seconds())), 0)
+			if !sleepCtx(ctx, wait) {
 				return
 			}
 			continue
 		}
 
-		// Idempotency: an instance with the same name already alive means we are done.
-		if computeClient, err := oci.GetComputeClient(&profile, task.Region); err == nil {
-			instList, err2 := computeClient.ListInstances(ctx, core.ListInstancesRequest{
-				CompartmentId: common.String(profile.TenancyOCID),
-				DisplayName:   common.String(task.InstanceName),
-			})
-			if ctx.Err() != nil {
-				return
-			}
-			if err2 == nil {
-				for _, inst := range instList.Items {
-					if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
-						continue
-					}
-					instOCID := oci.StrVal(inst.Id)
-					log.Printf("[Engine] Found existing instance %s (%s), marking task success", task.InstanceName, instOCID)
-					_, pubIP, ipv6 := waitForInstanceAddresses(ctx, &profile, task.Region, instOCID, currentTask.AssignPublicIP)
-					if ctx.Err() != nil {
-						return
-					}
-					storage.DB.Model(&currentTask).Updates(map[string]interface{}{
-						"status":                "success",
-						"success_instance_ocid": instOCID,
-						"success_public_ip":     pubIP,
-						"success_ipv6":          ipv6,
-						"last_message":          "开机成功（检测到云端已存在同名实例，防重复生效）",
-					})
-					notify.NotifyTaskSuccess(&currentTask, &profile, pubIP, ipv6, rootPassword)
-					emitLog(ctx, taskID.String(), currentTask.CurrentRetries+1, task.Region, "", "SUCCESS",
-						fmt.Sprintf("开机成功：云端已存在同名实例 %s，公网 IP %s", instOCID, pubIP), 0)
-					return
-				}
-			}
-		}
-
 		targetAD := adList[currentADIndex%len(adList)]
 		currentADIndex++
-		currentRetries := currentTask.CurrentRetries + 1
+		attemptNum := currentTask.CurrentRetries + 1
 
-		// Launch (the task copy carries the decrypted password for cloud-init / tags)
-		launchTask := currentTask
-		launchTask.RootPasswordEnc = rootPassword
-		startTime := time.Now()
-		instanceOCID, launchErr := oci.LaunchInstance(ctx, &profile, &launchTask, targetAD)
-		durationMs := time.Since(startTime).Milliseconds()
-		if ctx.Err() != nil {
-			// Stopped while the call was in flight: do not record a failure.
+		res := AttemptLaunch(ctx, &profile, &currentTask, targetAD, attemptNum, rootPassword)
+		if res.Category == CategoryCancelled && !res.Success {
 			return
 		}
 
-		now := time.Now()
-		storage.DB.Model(&currentTask).Updates(map[string]interface{}{
-			"current_retries": currentRetries,
-			"last_attempt_at": &now,
-		})
-
-		if launchErr == nil && instanceOCID != "" {
-			log.Printf("[Engine] Task %s launched instance %s", taskID, instanceOCID)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "SUCCESS",
-				fmt.Sprintf("抢机成功！实例 %s 创建中，正在等待网络就绪…", instanceOCID), durationMs)
-
-			state, pubIP, ipv6 := waitForInstanceAddresses(ctx, &profile, task.Region, instanceOCID, currentTask.AssignPublicIP)
-			msg := "开机成功"
-			if pubIP != "" {
-				msg = "开机成功，公网 IP " + pubIP
-			} else if state != "" {
-				msg = fmt.Sprintf("开机成功，实例状态 %s，公网 IP 尚未就绪，请稍后在实例页刷新", state)
-			}
-
-			storage.DB.Model(&currentTask).Updates(map[string]interface{}{
-				"status":                "success",
-				"success_instance_ocid": instanceOCID,
-				"success_public_ip":     pubIP,
-				"success_ipv6":          ipv6,
-				"last_message":          msg,
-			})
-			recordAttempt(taskID, currentRetries, task.Region, targetAD, "success", "创建实例成功 (Instance Launched)", durationMs)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "SUCCESS",
-				fmt.Sprintf("%s。实例 OCID: %s", msg, instanceOCID), durationMs)
-			notify.NotifyTaskSuccess(&currentTask, &profile, pubIP, ipv6, rootPassword)
+		if res.Success {
+			FinalizeSuccess(ctx, &profile, &currentTask, res, attemptNum, rootPassword)
 			return
 		}
 
-		category, reason := ClassifyError(launchErr)
-		var waitSecs int
-		switch category {
-		case CategoryCancelled:
-			return
-
+		var wait time.Duration
+		switch res.Category {
 		case CategoryFatalError:
-			log.Printf("[Engine] Task %s fatal error: %v", taskID, launchErr)
-			setTaskStatus(taskID, "failed", "致命错误熔断: "+reason)
-			recordAttempt(taskID, currentRetries, task.Region, targetAD, "fatal_error", reason, durationMs)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "FATAL", "配置或凭据错误，任务停止: "+reason, durationMs)
-			notify.NotifyTaskFatalError(&currentTask, &profile, reason)
+			setTaskStatus(taskID, "failed", "致命错误熔断: "+res.Reason)
+			notify.NotifyTaskFatalError(&currentTask, &profile, res.Reason)
 			return
-
 		case CategoryRateLimited:
 			backoffFactor *= 2
 			if backoffFactor > maxBackoffFactor {
 				backoffFactor = maxBackoffFactor
 			}
-			waitSecs = interval * backoffFactor
-			recordAttempt(taskID, currentRetries, task.Region, targetAD, "rate_limited", reason, durationMs)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "RATE_LIMIT",
-				fmt.Sprintf("429 限流，退避 %d 秒后重试", waitSecs), durationMs)
-
-		case CategoryTransient:
+			wait = RandomRetryWait() * time.Duration(backoffFactor)
+		default:
 			backoffFactor = 1
-			waitSecs = interval + rand.Intn(10)
-			recordAttempt(taskID, currentRetries, task.Region, targetAD, "transient_error", reason, durationMs)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "RETRY",
-				fmt.Sprintf("%s，%d 秒后重试", reason, waitSecs), durationMs)
-
-		default: // CategoryCapacityFull
-			backoffFactor = 1
-			waitSecs = interval + rand.Intn(10)
-			recordAttempt(taskID, currentRetries, task.Region, targetAD, "capacity_full", reason, durationMs)
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "RETRY",
-				fmt.Sprintf("容量不足 (Out of host capacity)，%d 秒后在下一可用区重试", waitSecs), durationMs)
+			wait = RandomRetryWait()
 		}
 
 		// Attempt budget is checked before sleeping so the last attempt does not waste an interval
-		if currentTask.MaxRetries > 0 && currentRetries >= currentTask.MaxRetries {
+		if currentTask.MaxRetries > 0 && attemptNum >= currentTask.MaxRetries {
 			setTaskStatus(taskID, "stopped", "已达到最大尝试次数限制，任务自动停止")
-			emitLog(ctx, taskID.String(), currentRetries, task.Region, targetAD, "STOPPED", "已达到设定的最大重试次数，任务停止", durationMs)
+			emitLog(taskID.String(), attemptNum, task.Region, targetAD, "STOPPED", "已达到设定的最大重试次数，任务停止", res.DurationMs)
 			return
 		}
 
-		if !sleepCtx(ctx, time.Duration(waitSecs)*time.Second) {
+		storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Update("last_message",
+			fmt.Sprintf("%s，%d 秒后重试（第 %d 次）", res.Reason, int(wait.Seconds()), attemptNum))
+		emitLog(taskID.String(), attemptNum, task.Region, targetAD, "WAIT", fmt.Sprintf("%d 秒后进行第 %d 次尝试", int(wait.Seconds()), attemptNum+1), 0)
+		if !sleepCtx(ctx, wait) {
 			return
 		}
 	}
 }
 
-func emitLog(ctx context.Context, taskID string, attemptNum int, region, ad, status, message string, durationMs int64) {
+func emitLog(taskID string, attemptNum int, region, ad, status, message string, durationMs int64) {
 	logMsg := LiveLogMessage{
 		TaskID:     taskID,
 		AttemptNum: attemptNum,
@@ -373,9 +426,8 @@ func emitLog(ctx context.Context, taskID string, attemptNum int, region, ad, sta
 	if err != nil {
 		return
 	}
-	// Publishing must work even while the worker context is being cancelled
+	// Publishing must work even while a worker context is being cancelled
 	bg, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	_ = ctx
 	_ = cache.PublishTaskLog(bg, taskID, string(payload))
 }

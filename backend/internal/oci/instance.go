@@ -239,9 +239,8 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		return "", err
 	}
 
-	tags := map[string]string{
-		"created_by": "oci-panel",
-	}
+	// Only the root password tag (a documented feature of this panel); no tool fingerprint.
+	tags := map[string]string{}
 	if task.LoginMode == "root_password" && task.RootPasswordEnc != "" {
 		tags["root_password"] = task.RootPasswordEnc
 	}
@@ -271,12 +270,14 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 			SubnetId:       common.String(task.SubnetOCID),
 			AssignPublicIp: common.Bool(task.AssignPublicIP),
 			AssignIpv6Ip:   common.Bool(task.EnableIPv6),
-			DisplayName:    common.String(task.InstanceName + "-vnic"),
+			DisplayName:    common.String(task.InstanceName),
 		},
 		Metadata: map[string]string{
 			"user_data": userDataB64,
 		},
-		FreeformTags: tags,
+	}
+	if len(tags) > 0 {
+		details.FreeformTags = tags
 	}
 	if task.LoginMode != "root_password" && strings.TrimSpace(task.SSHAuthorizedKeys) != "" {
 		// Also register the key through the platform so the default user works even if cloud-init fails

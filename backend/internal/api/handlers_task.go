@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,7 +22,7 @@ import (
 
 type CreateTaskRequest struct {
 	ProfileID           uint     `json:"profile_id" binding:"required"`
-	InstanceName        string   `json:"instance_name" binding:"required,min=2,max=128"`
+	InstanceName        string   `json:"instance_name" binding:"omitempty,min=2,max=128"`
 	Shape               string   `json:"shape" binding:"required,oneof=VM.Standard.A1.Flex VM.Standard.E2.1.Micro"`
 	OCPU                float64  `json:"ocpu" binding:"required,min=1,max=4"`
 	MemoryInGBs         float64  `json:"memory_in_gbs" binding:"required,min=1,max=24"`
@@ -40,7 +41,10 @@ type CreateTaskRequest struct {
 	MaxRetries          int      `json:"max_retries" binding:"min=0"`
 }
 
-const accountLockHandlerTTL = 2 * time.Minute
+const (
+	accountLockHandlerTTL = 2 * time.Minute
+	firstAttemptTimeout   = 150 * time.Second
+)
 
 func parseTaskID(c *gin.Context) (uuid.UUID, bool) {
 	taskID, err := uuid.Parse(c.Param("id"))
@@ -85,7 +89,10 @@ func ListTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
-// CreateTask creates a launch task and starts the background worker
+// CreateTask creates the instance right away: one LaunchInstance attempt per availability
+// domain, synchronously. On success the instance exists when the response returns. On a
+// capacity-type failure the task is left "stopped" and the response says it is retryable, so
+// the UI can ask the user whether to queue automatic retries (POST /tasks/start/:id).
 func CreateTask(c *gin.Context) {
 	var req CreateTaskRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -110,12 +117,20 @@ func CreateTask(c *gin.Context) {
 	if strings.Contains(req.Shape, "Micro") {
 		req.OCPU, req.MemoryInGBs = 1, 1
 	}
+	instanceName := strings.TrimSpace(req.InstanceName)
+	if instanceName == "" {
+		instanceName = engine.RandomInstanceName()
+	}
 
-	// One OCI account at a time (the worker keeps refreshing this lock while it runs)
+	// One OCI account at a time
 	if !acquireLockOrReject(c, profile.ID) {
 		return
 	}
-	releaseLock := func() { _ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID) }
+	releaseLock := func() {
+		bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = cache.ReleaseAccountLock(bg, profile.ID)
+	}
 
 	adList := ""
 	if len(req.ADList) > 0 {
@@ -128,14 +143,7 @@ func CreateTask(c *gin.Context) {
 		vpu = 120
 	}
 
-	retryInterval := req.RetryIntervalSecs
-	if retryInterval <= 0 {
-		retryInterval = 60
-	} else if retryInterval < 15 {
-		retryInterval = 15
-	}
-
-	// The root password is stored encrypted at rest and decrypted only inside the worker
+	// The root password is stored encrypted at rest and decrypted only inside the engine
 	rootPasswordEnc := ""
 	if loginMode == "root_password" {
 		enc, err := security.EncryptAES256GCM(req.RootPassword, config.GlobalConfig.MasterKey)
@@ -150,7 +158,7 @@ func CreateTask(c *gin.Context) {
 	task := storage.LaunchTask{
 		ID:                  uuid.New(),
 		ProfileID:           profile.ID,
-		InstanceName:        strings.TrimSpace(req.InstanceName),
+		InstanceName:        instanceName,
 		Shape:               req.Shape,
 		OCPU:                req.OCPU,
 		MemoryInGBs:         req.MemoryInGBs,
@@ -165,8 +173,8 @@ func CreateTask(c *gin.Context) {
 		RootPasswordEnc:     rootPasswordEnc,
 		AssignPublicIP:      req.AssignPublicIP,
 		EnableIPv6:          req.EnableIPv6,
-		Status:              "running",
-		RetryIntervalSecs:   retryInterval,
+		Status:              "creating",
+		RetryIntervalSecs:   req.RetryIntervalSecs,
 		MaxRetries:          req.MaxRetries,
 		CreatedAt:           time.Now(),
 	}
@@ -180,27 +188,97 @@ func CreateTask(c *gin.Context) {
 
 	if err := storage.DB.Create(&task).Error; err != nil {
 		releaseLock()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存开机任务失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存创建任务失败: " + err.Error()})
 		return
 	}
 
-	if err := engine.StartTask(task.ID); err != nil {
-		releaseLock()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "启动后台抢机调度器失败: " + err.Error()})
-		return
-	}
-
-	storage.LogAudit("CREATE_TASK", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
+	storage.LogAudit("CREATE_INSTANCE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"),
 		fmt.Sprintf("%s %s %.0fC/%.0fG %dGB in %s", task.InstanceName, task.Shape, task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, task.Region), "SUCCESS")
 
+	// ---- Synchronous first attempt (detached from the HTTP request so a client disconnect
+	//      cannot leave a half-recorded attempt) ----
+	ctx, cancel := context.WithTimeout(context.Background(), firstAttemptTimeout)
+	defer cancel()
+
+	adNames, err := engine.ResolveADList(ctx, &profile, &task)
+	if err != nil {
+		releaseLock()
+		msg := "无法获取可用区列表: " + err.Error()
+		storage.DB.Model(&task).Updates(map[string]interface{}{"status": "failed", "last_message": msg})
+		c.JSON(http.StatusOK, gin.H{
+			"result": "failed", "retryable": false, "reason": msg, "task_id": task.ID.String(), "task": task,
+		})
+		return
+	}
+
+	rootPassword := req.RootPassword
+	var last engine.AttemptResult
+	attempts := 0
+	for i, ad := range adNames {
+		attempts = i + 1
+		last = engine.AttemptLaunch(ctx, &profile, &task, ad, attempts, rootPassword)
+		if last.Success || last.Category == engine.CategoryFatalError || last.Category == engine.CategoryCancelled {
+			break
+		}
+	}
+
+	if last.Success {
+		msg := "实例已创建，正在等待网络就绪"
+		if last.AlreadyExisted {
+			msg = "云端已存在同名实例，视为创建成功"
+		}
+		storage.DB.Model(&task).Updates(map[string]interface{}{
+			"status":                "success",
+			"success_instance_ocid": last.InstanceOCID,
+			"last_message":          msg,
+		})
+		releaseLock()
+
+		// Wait for RUNNING + public IP in the background, then notify
+		taskCopy := task
+		profileCopy := profile
+		go func() {
+			bg, cancelBg := context.WithTimeout(context.Background(), 6*time.Minute)
+			defer cancelBg()
+			engine.FinalizeSuccess(bg, &profileCopy, &taskCopy, last, attempts, rootPassword)
+		}()
+
+		c.JSON(http.StatusOK, gin.H{
+			"result":        "created",
+			"message":       msg,
+			"task_id":       task.ID.String(),
+			"instance_ocid": last.InstanceOCID,
+			"existed":       last.AlreadyExisted,
+			"task":          task,
+		})
+		return
+	}
+
+	releaseLock()
+
+	if last.Category == engine.CategoryFatalError {
+		storage.DB.Model(&task).Updates(map[string]interface{}{"status": "failed", "last_message": "创建失败: " + last.Reason})
+		notify.NotifyTaskFatalError(&task, &profile, last.Reason)
+		c.JSON(http.StatusOK, gin.H{
+			"result": "failed", "retryable": false, "reason": last.Reason, "attempts": attempts,
+			"task_id": task.ID.String(), "task": task,
+		})
+		return
+	}
+
+	reason := last.Reason
+	if last.Category == engine.CategoryCancelled {
+		reason = "创建请求超时，请重试"
+	}
+	storage.DB.Model(&task).Updates(map[string]interface{}{"status": "stopped", "last_message": "创建失败: " + reason + "（未排队）"})
 	c.JSON(http.StatusOK, gin.H{
-		"message": "抢机任务已创建并在后台运行",
-		"task_id": task.ID.String(),
-		"task":    task,
+		"result": "failed", "retryable": true, "reason": reason, "attempts": attempts,
+		"task_id": task.ID.String(), "task": task,
 	})
 }
 
-// StartExistingTask resumes a stopped or failed task
+// StartExistingTask queues automatic retries (60-180 s random interval) for a task that
+// failed to create or was stopped
 func StartExistingTask(c *gin.Context) {
 	taskID, ok := parseTaskID(c)
 	if !ok {
@@ -217,7 +295,7 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 	if task.Status == "running" && engine.IsTaskActive(taskID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "任务已在运行中"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "任务已在排队重试中"})
 		return
 	}
 
@@ -237,19 +315,16 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 
-	// A manual restart starts a fresh attempt budget; the attempt history is kept.
-	storage.DB.Model(&task).Update("current_retries", 0)
-
 	if err := engine.StartTask(taskID); err != nil {
 		_ = cache.ReleaseAccountLock(c.Request.Context(), profile.ID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "抢机任务已重新启动"})
+	c.JSON(http.StatusOK, gin.H{"message": "已加入排队，每 60-180 秒随机重试一次，直到创建成功"})
 }
 
-// StopExistingTask stops a running task
+// StopExistingTask stops a queued task
 func StopExistingTask(c *gin.Context) {
 	taskID, ok := parseTaskID(c)
 	if !ok {
@@ -257,7 +332,7 @@ func StopExistingTask(c *gin.Context) {
 	}
 
 	engine.StopTask(taskID)
-	c.JSON(http.StatusOK, gin.H{"message": "抢机任务已停止"})
+	c.JSON(http.StatusOK, gin.H{"message": "已停止排队"})
 }
 
 // DeleteExistingTask deletes a task and its attempt history
@@ -271,7 +346,7 @@ func DeleteExistingTask(c *gin.Context) {
 	storage.DB.Where("task_id = ?", taskID).Delete(&storage.TaskAttempt{})
 	storage.DB.Delete(&storage.LaunchTask{}, "id = ?", taskID)
 
-	c.JSON(http.StatusOK, gin.H{"message": "任务及历史记录已删除"})
+	c.JSON(http.StatusOK, gin.H{"message": "记录已删除"})
 }
 
 // ListPresets returns pre-configured free-tier presets
@@ -383,7 +458,7 @@ func TestTelegram(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请先保存 Bot Token 和 Chat ID"})
 		return
 	}
-	text := "🔔 <b>OCI 控制台测试消息</b>\nTelegram 通知配置正常，开机成功与任务熔断告警会发送到这里。"
+	text := "🔔 <b>OCI 控制台测试消息</b>\nTelegram 通知配置正常，实例创建成功与任务熔断告警会发送到这里。"
 	if err := notify.SendTelegramMessage(botToken, chatID, text); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "发送失败: " + err.Error()})
 		return

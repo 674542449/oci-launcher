@@ -9,11 +9,6 @@
       </template>
     </PageHeader>
 
-    <div class="notice notice-info mb-4">
-      <n-icon size="18" class="mt-0.5 shrink-0"><InformationCircleOutline /></n-icon>
-      <span>Oracle 会回收连续 7 天 CPU、网络与内存使用率都低于 20% 的 Always Free 实例。长期空闲的机器请保持一定负载。</span>
-    </div>
-
     <div class="card overflow-hidden">
       <!-- loading -->
       <div v-if="loading && instances.length === 0" class="divide-y divide-line">
@@ -154,7 +149,6 @@ import { NButton, NIcon, NModal, NSlider, NFormItem, NInput, NDropdown, NSkeleto
 import type { DropdownOption } from 'naive-ui'
 import {
   RefreshOutline,
-  InformationCircleOutline,
   EyeOutline,
   EyeOffOutline,
   EllipsisHorizontal,

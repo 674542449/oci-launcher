@@ -19,7 +19,7 @@ const router = createRouter({
       path: '/launcher',
       name: 'Launcher',
       component: () => import('./views/Launcher.vue'),
-      meta: { title: '抢机任务' },
+      meta: { title: '创建实例' },
     },
     {
       path: '/instances',

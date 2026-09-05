@@ -19,23 +19,28 @@ type User struct {
 }
 
 type OCIProfile struct {
-	ID                  uint      `gorm:"primaryKey" json:"id"`
-	Name                string    `gorm:"size:64;uniqueIndex;not null" json:"name"`
-	TenancyOCID         string    `gorm:"size:255;not null" json:"tenancy_ocid"`
-	UserOCID            string    `gorm:"size:255;not null" json:"user_ocid"`
-	Fingerprint         string    `gorm:"size:128;not null" json:"fingerprint"`
-	Region              string    `gorm:"size:64;not null" json:"region"`
-	PrivateKeyEnc       string    `gorm:"type:text;not null" json:"-"`
-	AccountTypeOverride string    `gorm:"size:16;default:'auto'" json:"account_type_override"` // auto, free, payg
-	DetectedType        string    `gorm:"size:32;default:'UNKNOWN'" json:"detected_type"`      // FREE_TIER, PAYG, PROMOTION
-	DetectionReason     string    `gorm:"type:text" json:"detection_reason"`
-	Status              string    `gorm:"size:32;default:'Active'" json:"status"` // Active, Banned, Invalid
-	StatusMessage       string    `gorm:"type:text" json:"status_message"`
-	Tags                string    `gorm:"type:text" json:"tags"`  // comma-separated tags e.g. "Main,PAYG,Tokyo"
-	Notes               string    `gorm:"type:text" json:"notes"` // personal remarks/email
-	IsActive            bool      `gorm:"default:true" json:"is_active"`
-	CreatedAt           time.Time `json:"created_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	ID                  uint       `gorm:"primaryKey" json:"id"`
+	Name                string     `gorm:"size:64;uniqueIndex;not null" json:"name"`
+	TenancyOCID         string     `gorm:"size:255;not null" json:"tenancy_ocid"`
+	UserOCID            string     `gorm:"size:255;not null" json:"user_ocid"`
+	Fingerprint         string     `gorm:"size:128;not null" json:"fingerprint"`
+	Region              string     `gorm:"size:64;not null" json:"region"`
+	PrivateKeyEnc       string     `gorm:"type:text;not null" json:"-"`
+	AccountTypeOverride string     `gorm:"size:16;default:'auto'" json:"account_type_override"` // auto, free, payg
+	DetectedType        string     `gorm:"size:32;default:'UNKNOWN'" json:"detected_type"`      // FREE_TIER, PAYG, PROMOTION
+	DetectionReason     string     `gorm:"type:text" json:"detection_reason"`
+	DetectionSource     string     `gorm:"size:32" json:"detection_source"` // subscription (Organizations API) or limits (fallback)
+	AccountEmail        string     `gorm:"size:255" json:"account_email"`
+	AccountCreatedAt    *time.Time `json:"account_created_at"`
+	TenancyName         string     `gorm:"size:128" json:"tenancy_name"`
+	CountryCode         string     `gorm:"size:8" json:"country_code"`
+	Status              string     `gorm:"size:32;default:'Active'" json:"status"` // Active, Banned, Invalid
+	StatusMessage       string     `gorm:"type:text" json:"status_message"`
+	Tags                string     `gorm:"type:text" json:"tags"`  // comma-separated tags e.g. "Main,PAYG,Tokyo"
+	Notes               string     `gorm:"type:text" json:"notes"` // personal remarks/email
+	IsActive            bool       `gorm:"default:true" json:"is_active"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
 type LaunchTask struct {

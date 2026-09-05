@@ -87,6 +87,14 @@ func StopTask(taskID uuid.UUID) {
 
 // ResumeAllRunningTasks recovers running tasks after a restart
 func ResumeAllRunningTasks() {
+	// A synchronous first attempt that was interrupted by the restart cannot be resumed as such
+	_ = storage.DB.Model(&storage.LaunchTask{}).
+		Where("status = ?", "creating").
+		Updates(map[string]interface{}{
+			"status":       "stopped",
+			"last_message": "服务重启时创建被中断，可点击「重试」重新排队",
+		}).Error
+
 	var tasks []storage.LaunchTask
 	if err := storage.DB.Where("status = ?", "running").Find(&tasks).Error; err == nil {
 		log.Printf("[Scheduler] Resuming %d active tasks from database...", len(tasks))
