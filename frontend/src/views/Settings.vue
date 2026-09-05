@@ -76,6 +76,43 @@
         </n-form>
       </section>
 
+      <!-- Bans -->
+      <section class="card overflow-hidden">
+        <div class="card-head card-pad pb-4">
+          <div>
+            <h2 class="section-title">IP 封禁</h2>
+            <p class="caption">密码连错 6 次封 30 分钟、12 次封 24 小时；验证码连错 15 次封 1 小时；触发蜜罐或扫描器特征封 24 小时。误封可在此解除。</p>
+          </div>
+          <n-button size="small" secondary :loading="loadingBans" @click="fetchBans">
+            <template #icon><n-icon><RefreshOutline /></n-icon></template>
+            刷新
+          </n-button>
+        </div>
+        <EmptyState v-if="!loadingBans && bans.length === 0" title="当前没有被封禁的 IP" :description="yourIP ? `你当前的访问 IP：${yourIP}` : ''" />
+        <div v-else class="tbl-wrap border-t border-line">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>IP</th>
+                <th>原因</th>
+                <th>剩余时间</th>
+                <th class="text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="b in bans" :key="b.ip">
+                <td class="mono text-[13px] font-medium text-ink">{{ b.ip }}<span v-if="b.ip === yourIP" class="pill pill-warn ml-2">当前 IP</span></td>
+                <td class="text-ink-2">{{ b.reason || '—' }}</td>
+                <td class="mono whitespace-nowrap text-ink-2">{{ formatRemaining(b.expires_in_secs) }}</td>
+                <td class="text-right whitespace-nowrap">
+                  <n-button size="small" secondary type="success" :loading="unbanning === b.ip" @click="unban(b.ip)">解封</n-button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Audit log -->
       <section class="card overflow-hidden">
         <div class="card-head card-pad pb-4">
@@ -142,6 +179,44 @@ const changingPwd = ref(false)
 
 const auditLogs = ref<any[]>([])
 const loadingLogs = ref(false)
+
+const bans = ref<any[]>([])
+const loadingBans = ref(false)
+const unbanning = ref('')
+const yourIP = ref('')
+
+const formatRemaining = (secs: number) => {
+  if (!secs || secs < 0) return '永久'
+  if (secs < 60) return `${secs} 秒`
+  if (secs < 3600) return `${Math.ceil(secs / 60)} 分钟`
+  return `${Math.floor(secs / 3600)} 小时 ${Math.ceil((secs % 3600) / 60)} 分钟`
+}
+
+const fetchBans = async () => {
+  loadingBans.value = true
+  try {
+    const res: any = await api.get('/security/bans')
+    bans.value = res.bans || []
+    yourIP.value = res.your_ip || ''
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    loadingBans.value = false
+  }
+}
+
+const unban = async (ip: string) => {
+  unbanning.value = ip
+  try {
+    const res: any = await api.post('/security/unban', { ip })
+    message.success(res.message || '已解封')
+    await fetchBans()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    unbanning.value = ''
+  }
+}
 
 const formatTime = (t: string) => {
   if (!t) return ''
@@ -246,5 +321,6 @@ const fetchAuditLogs = async () => {
 onMounted(() => {
   loadSettings()
   fetchAuditLogs()
+  fetchBans()
 })
 </script>

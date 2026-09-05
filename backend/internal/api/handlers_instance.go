@@ -93,11 +93,19 @@ func PerformInstanceAction(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("操作 [%s] 指令已成功下发至云端", req.Action)})
 }
 
-// TerminateInstance deletes an instance
+type TerminateInstanceRequest struct {
+	ProfileID uint   `json:"profile_id" binding:"required"`
+	Region    string `json:"region" binding:"required"`
+	OCID      string `json:"ocid" binding:"required"`
+}
+
+// TerminateInstance deletes an instance (and its boot volume)
 func TerminateInstance(c *gin.Context) {
-	var req InstanceActionRequest
+	// Note: must not reuse InstanceActionRequest, whose required "action" field the
+	// terminate call never sends (that made every terminate fail with "Invalid request").
+	var req TerminateInstanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request: " + err.Error()})
 		return
 	}
 

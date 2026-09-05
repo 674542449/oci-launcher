@@ -142,6 +142,10 @@ func SetupRouter() *gin.Engine {
 			protected.GET("/settings", GetSettings)
 			protected.POST("/settings/save", SaveSetting)
 			protected.POST("/settings/test-telegram", TestTelegram)
+
+			// Security: bans
+			protected.GET("/security/bans", ListBans)
+			protected.POST("/security/unban", UnbanIP)
 		}
 	}
 

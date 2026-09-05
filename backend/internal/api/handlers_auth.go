@@ -179,21 +179,20 @@ func Verify2FAStep2(c *gin.Context) {
 		return
 	}
 
-	// 2. Verify TOTP code; wrong codes count against the temp token and the client IP
+	// 2. Verify TOTP code; wrong codes count per temp token (5 -> token consumed) and per IP (15 -> 1 h ban)
 	if !auth.VerifyTOTPCode(secret, req.Code) {
-		failures, _ := cache.RecordTOTPFailure(ctx, claims.ID)
-		isLocked, lockDur, attempts, _ := cache.RecordLoginFailure(ctx, clientIP, user.Username)
-		storage.LogAudit("2FA_FAIL", user.Username, clientIP, c.GetHeader("User-Agent"), fmt.Sprintf("Wrong 2FA code (token failure %d, ip failure %d)", failures, attempts), "FAILED")
-		if failures >= 5 {
+		tokenFails, ipFails, tokenExhausted, ipLocked, _ := cache.RecordTOTPFailure(ctx, claims.ID, clientIP)
+		storage.LogAudit("2FA_FAIL", user.Username, clientIP, c.GetHeader("User-Agent"), fmt.Sprintf("Wrong 2FA code (token failure %d, ip failure %d)", tokenFails, ipFails), "FAILED")
+		if ipLocked {
+			c.JSON(http.StatusTooManyRequests, gin.H{"error": "验证码错误次数过多，该 IP 已被封禁 1 小时"})
+			return
+		}
+		if tokenExhausted {
 			_ = cache.BlacklistJTI(ctx, claims.ID, 10*time.Minute)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Too many wrong 2FA codes, please login again"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "验证码连续错误 5 次，请重新输入密码登录"})
 			return
 		}
-		if isLocked {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": fmt.Sprintf("Too many failed attempts. Account locked for %v", lockDur)})
-			return
-		}
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid 2FA code"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": fmt.Sprintf("验证码错误（本次登录还可重试 %d 次）", 5-tokenFails)})
 		return
 	}
 

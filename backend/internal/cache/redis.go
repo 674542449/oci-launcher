@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -12,6 +14,19 @@ import (
 var RDB *redis.Client
 
 const accountLockKey = "oci:global_account_lock"
+
+// Lockout policy (per client IP, 30-minute window)
+const (
+	loginDelayAfter   = 3  // wrong passwords before each further attempt is slowed down
+	loginBanAfter     = 6  // wrong passwords -> 30 min ban
+	loginLongBanAfter = 12 // wrong passwords -> 24 h ban
+	totpTokenMaxFails = 5  // wrong codes per temp token -> token consumed
+	totpIPBanAfter    = 15 // wrong codes per IP -> 1 h ban
+	failureWindow     = 30 * time.Minute
+	loginBanDuration  = 30 * time.Minute
+	longBanDuration   = 24 * time.Hour
+	totpBanDuration   = 1 * time.Hour
+)
 
 func InitRedis(addr, password string) (*redis.Client, error) {
 	client := redis.NewClient(&redis.Options{
@@ -33,6 +48,21 @@ func InitRedis(addr, password string) (*redis.Client, error) {
 	RDB = client
 	log.Println("Redis connected successfully")
 	return client, nil
+}
+
+// IsImmuneIP reports addresses that must never be banned: loopback, link-local and private
+// ranges. Docker networks are private, so this covers the nginx / Cloudflare Tunnel containers —
+// banning one of those would lock every visitor out at once.
+func IsImmuneIP(ip string) bool {
+	ip = strings.TrimSpace(ip)
+	if ip == "" || ip == "localhost" {
+		return true
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return false
+	}
+	return parsed.IsLoopback() || parsed.IsPrivate() || parsed.IsLinkLocalUnicast() || parsed.IsUnspecified()
 }
 
 // acquireOrRefreshScript takes the global lock when it is free, and refreshes the TTL when it is
@@ -77,70 +107,109 @@ func ReleaseAccountLock(ctx context.Context, profileID uint) error {
 	return releaseScript.Run(ctx, RDB, []string{accountLockKey}, val).Err()
 }
 
+func blacklistKey(ip string) string { return fmt.Sprintf("blacklist:ip:%s", ip) }
+
 // IsIPBlacklisted checks if an IP is banned
 func IsIPBlacklisted(ctx context.Context, ip string) bool {
-	if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
+	if IsImmuneIP(ip) {
 		return false
 	}
-	key := fmt.Sprintf("blacklist:ip:%s", ip)
-	exists, err := RDB.Exists(ctx, key).Result()
+	exists, err := RDB.Exists(ctx, blacklistKey(ip)).Result()
 	if err != nil {
 		return false
 	}
 	return exists > 0
 }
 
-// BlacklistIP bans an IP for a specific duration
+// BlacklistIP bans an IP for a specific duration (immune addresses are only logged)
 func BlacklistIP(ctx context.Context, ip string, duration time.Duration, reason string) error {
-	if ip == "127.0.0.1" || ip == "::1" || ip == "localhost" {
-		return nil // Immune from blacklisting
+	if IsImmuneIP(ip) {
+		log.Printf("[Security] not banning immune address %s (%s)", ip, reason)
+		return nil
 	}
-	key := fmt.Sprintf("blacklist:ip:%s", ip)
-	return RDB.Set(ctx, key, reason, duration).Err()
+	return RDB.Set(ctx, blacklistKey(ip), reason, duration).Err()
 }
 
-// RecordLoginFailure records a login failure and returns lockout status and attempt count
+// BanInfo describes one active ban
+type BanInfo struct {
+	IP        string `json:"ip"`
+	Reason    string `json:"reason"`
+	ExpiresIn int64  `json:"expires_in_secs"`
+}
+
+// ListBannedIPs returns every active ban with its reason and remaining time
+func ListBannedIPs(ctx context.Context) ([]BanInfo, error) {
+	bans := []BanInfo{}
+	iter := RDB.Scan(ctx, 0, "blacklist:ip:*", 200).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		ip := strings.TrimPrefix(key, "blacklist:ip:")
+		reason, _ := RDB.Get(ctx, key).Result()
+		ttl, _ := RDB.TTL(ctx, key).Result()
+		bans = append(bans, BanInfo{IP: ip, Reason: reason, ExpiresIn: int64(ttl.Seconds())})
+	}
+	return bans, iter.Err()
+}
+
+// UnbanIP lifts the ban and clears the failure counters of an IP
+func UnbanIP(ctx context.Context, ip string) error {
+	return RDB.Del(ctx, blacklistKey(ip), fmt.Sprintf("auth:fail:%s", ip), fmt.Sprintf("totp:failip:%s", ip)).Err()
+}
+
+// RecordLoginFailure counts wrong passwords per IP and returns the lockout status.
+// Policy: from the 3rd failure each attempt is slowed down, 6 failures -> 30 min ban, 12 -> 24 h.
 func RecordLoginFailure(ctx context.Context, ip, username string) (isLocked bool, lockDuration time.Duration, attempts int64, err error) {
 	key := fmt.Sprintf("auth:fail:%s", ip)
 	pipe := RDB.Pipeline()
 	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, 30*time.Minute)
+	pipe.Expire(ctx, key, failureWindow)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return false, 0, 0, err
 	}
 
 	count := incr.Val()
-	if count >= 10 {
-		_ = BlacklistIP(ctx, ip, 24*time.Hour, "Brute force login attack (10+ failures)")
-		return true, 24 * time.Hour, count, nil
-	} else if count >= 5 {
-		_ = BlacklistIP(ctx, ip, 1*time.Hour, "Multiple login failures (5+ failures)")
-		return true, 1 * time.Hour, count, nil
-	} else if count >= 2 {
-		// Progressive penalty delay
+	switch {
+	case count >= loginLongBanAfter:
+		_ = BlacklistIP(ctx, ip, longBanDuration, fmt.Sprintf("Brute force login (%d failures)", count))
+		return true, longBanDuration, count, nil
+	case count >= loginBanAfter:
+		_ = BlacklistIP(ctx, ip, loginBanDuration, fmt.Sprintf("Repeated login failures (%d)", count))
+		return true, loginBanDuration, count, nil
+	case count >= loginDelayAfter:
 		time.Sleep(2 * time.Second)
 	}
-
 	return false, 0, count, nil
 }
 
-// ResetLoginFailures clears failure count after successful login
+// ResetLoginFailures clears failure counters after a successful login
 func ResetLoginFailures(ctx context.Context, ip string) {
-	key := fmt.Sprintf("auth:fail:%s", ip)
-	RDB.Del(ctx, key)
+	RDB.Del(ctx, fmt.Sprintf("auth:fail:%s", ip), fmt.Sprintf("totp:failip:%s", ip))
 }
 
-// RecordTOTPFailure counts wrong one-time codes per temp-token id. Returns the failure count.
-func RecordTOTPFailure(ctx context.Context, tokenJTI string) (int64, error) {
-	key := fmt.Sprintf("totp:fail:%s", tokenJTI)
+// RecordTOTPFailure counts wrong one-time codes per temp token and per IP.
+// tokenExhausted: the temp token must be consumed (5 wrong codes); ipLocked: the IP was banned (15 in 30 min).
+func RecordTOTPFailure(ctx context.Context, tokenJTI, ip string) (tokenFails, ipFails int64, tokenExhausted, ipLocked bool, err error) {
+	tokenKey := fmt.Sprintf("totp:fail:%s", tokenJTI)
+	ipKey := fmt.Sprintf("totp:failip:%s", ip)
 	pipe := RDB.Pipeline()
-	incr := pipe.Incr(ctx, key)
-	pipe.Expire(ctx, key, 10*time.Minute)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return 0, err
+	tokenIncr := pipe.Incr(ctx, tokenKey)
+	pipe.Expire(ctx, tokenKey, 10*time.Minute)
+	ipIncr := pipe.Incr(ctx, ipKey)
+	pipe.Expire(ctx, ipKey, failureWindow)
+	if _, err = pipe.Exec(ctx); err != nil {
+		return 0, 0, false, false, err
 	}
-	return incr.Val(), nil
+	tokenFails, ipFails = tokenIncr.Val(), ipIncr.Val()
+	tokenExhausted = tokenFails >= totpTokenMaxFails
+	if ipFails >= totpIPBanAfter {
+		_ = BlacklistIP(ctx, ip, totpBanDuration, fmt.Sprintf("Repeated wrong 2FA codes (%d)", ipFails))
+		ipLocked = true
+	}
+	if tokenFails >= 2 {
+		time.Sleep(1 * time.Second)
+	}
+	return
 }
 
 // CheckAndSetTOTPUsed prevents TOTP replay attacks

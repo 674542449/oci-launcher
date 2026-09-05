@@ -150,8 +150,9 @@ func AntiScannerMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		clientIP := c.ClientIP()
 
-		// Local loopback is completely immune to prevent local container lockout
-		if clientIP == "127.0.0.1" || clientIP == "::1" || clientIP == "localhost" {
+		// Loopback and private/docker addresses (nginx, the tunnel container) are never banned:
+		// banning them would lock every visitor out at once.
+		if cache.IsImmuneIP(clientIP) {
 			c.Next()
 			return
 		}
@@ -219,7 +220,7 @@ func IPWhitelistMiddleware(allowedIPs []string) gin.HandlerFunc {
 // HoneypotTrapHandler blocks anyone probing honeypot trap routes
 func HoneypotTrapHandler(c *gin.Context) {
 	clientIP := c.ClientIP()
-	if clientIP == "127.0.0.1" || clientIP == "::1" || clientIP == "localhost" {
+	if cache.IsImmuneIP(clientIP) {
 		c.AbortWithStatus(http.StatusNotFound)
 		return
 	}
