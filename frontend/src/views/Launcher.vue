@@ -14,6 +14,25 @@
       </div>
     </div>
 
+    <!-- Queued retries: only shown while something is retrying -->
+    <div v-if="activeTasks.length" class="mb-6 space-y-2">
+      <div v-for="t in activeTasks" :key="t.id" class="notice notice-info items-center">
+        <span class="relative flex h-2.5 w-2.5 shrink-0">
+          <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-info opacity-50"></span>
+          <span class="relative inline-flex h-2.5 w-2.5 rounded-full bg-info"></span>
+        </span>
+        <div class="flex flex-1 flex-wrap items-center justify-between gap-3">
+          <span>
+            <b class="mono">{{ t.instance_name }}</b>
+            {{ t.status === 'creating' ? '正在创建…' : '排队重试中' }}
+            <span class="mono">· 第 {{ t.current_retries }} 次</span>
+            <span v-if="t.last_message" class="text-ink-2">· {{ t.last_message }}</span>
+          </span>
+          <n-button v-if="t.status === 'running'" size="small" secondary type="warning" :loading="taskActing === t.id" @click="stopTask(t)">停止排队</n-button>
+        </div>
+      </div>
+    </div>
+
     <!-- ===== Presets ===== -->
     <section v-if="presets.length" class="mb-6">
       <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
@@ -186,89 +205,6 @@
       </n-form>
     </section>
 
-    <!-- ===== Records ===== -->
-    <section class="card mt-6 overflow-hidden">
-      <div class="card-head card-pad pb-4">
-        <div>
-          <h2 class="section-title">创建记录</h2>
-          <p class="caption">当前账号的创建与排队记录。进行中的记录每 15 秒自动刷新。</p>
-        </div>
-        <n-button size="small" secondary :loading="loadingTasks" @click="fetchTasks">
-          <template #icon><n-icon><RefreshOutline /></n-icon></template>
-          刷新
-        </n-button>
-      </div>
-      <EmptyState v-if="!loadingTasks && tasks.length === 0" title="还没有创建记录" description="用上方表单创建第一台实例。" />
-      <div v-else class="tbl-wrap border-t border-line">
-        <table class="tbl">
-          <thead>
-            <tr>
-              <th>实例</th>
-              <th>状态</th>
-              <th>尝试</th>
-              <th>最近消息</th>
-              <th>结果</th>
-              <th class="text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="t in tasks" :key="t.id">
-              <td class="min-w-[200px]">
-                <div class="mono font-semibold text-ink">{{ t.instance_name }}</div>
-                <div class="mono mt-0.5 text-xs text-ink-3">{{ t.shape.includes('A1') ? 'A1' : 'E2 Micro' }} · {{ t.ocpu }}C / {{ t.memory_in_gbs }}G · {{ t.boot_volume_size_in_gbs }} GB</div>
-                <div class="mono mt-0.5 text-xs text-ink-3">{{ formatTime(t.created_at) }}</div>
-              </td>
-              <td><StatusPill :state="taskState(t.status)" :label="taskLabel(t.status)" /></td>
-              <td class="mono whitespace-nowrap text-ink">{{ t.current_retries }}<span v-if="t.max_retries" class="text-ink-3"> / {{ t.max_retries }}</span></td>
-              <td class="max-w-[280px]"><span class="line-clamp-2 text-xs leading-5 text-ink-2" :title="t.last_message">{{ t.last_message || '—' }}</span></td>
-              <td class="whitespace-nowrap">
-                <div v-if="t.success_public_ip" class="mono text-[13px] font-medium text-ink">{{ t.success_public_ip }}</div>
-                <div v-if="t.success_ipv6" class="mono max-w-[180px] truncate text-xs text-ink-3" :title="t.success_ipv6">{{ t.success_ipv6 }}</div>
-                <span v-if="!t.success_public_ip && !t.success_ipv6" class="text-xs text-ink-3">—</span>
-              </td>
-              <td class="text-right whitespace-nowrap">
-                <div class="inline-flex items-center gap-1.5">
-                  <n-button size="small" secondary @click="openAttempts(t)">尝试记录</n-button>
-                  <n-button v-if="t.status === 'running'" size="small" secondary type="warning" :loading="taskActing === t.id" @click="stopTask(t)">停止排队</n-button>
-                  <n-button v-else-if="t.status === 'stopped' || t.status === 'failed'" size="small" secondary type="success" :loading="taskActing === t.id" @click="startTask(t)">排队重试</n-button>
-                  <n-button size="small" quaternary type="error" @click="deleteTask(t)">删除</n-button>
-                </div>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </section>
-
-    <!-- Attempts -->
-    <n-modal v-model:show="showAttemptsModal" preset="card" :title="`尝试记录 · ${attemptsTask?.instance_name || ''}`" style="max-width: 760px" :bordered="false">
-      <div v-if="loadingAttempts" class="py-8 text-center text-ink-3">加载中…</div>
-      <EmptyState v-else-if="attempts.length === 0" title="还没有尝试记录" />
-      <div v-else class="tbl-wrap max-h-[60vh] overflow-y-auto">
-        <table class="tbl">
-          <thead class="sticky top-0 z-10">
-            <tr>
-              <th>时间</th>
-              <th>#</th>
-              <th>可用区</th>
-              <th>结果</th>
-              <th>消息</th>
-              <th>耗时</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="a in attempts" :key="a.id">
-              <td class="mono whitespace-nowrap text-ink-3">{{ formatTime(a.created_at) }}</td>
-              <td class="mono">{{ a.attempt_num }}</td>
-              <td class="mono text-xs text-ink-2">{{ shortAD(a.ad) }}</td>
-              <td><StatusPill :state="attemptState(a.status)" :label="attemptLabel(a.status)" /></td>
-              <td class="max-w-[320px] text-xs leading-5 text-ink-2">{{ a.response_message }}</td>
-              <td class="mono whitespace-nowrap text-xs text-ink-3">{{ a.duration_ms }} ms</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-    </n-modal>
   </div>
 </template>
 
@@ -287,7 +223,6 @@ import {
   NRadioGroup,
   NRadio,
   NSpace,
-  NModal,
   useMessage,
   useDialog,
 } from 'naive-ui'
@@ -296,8 +231,6 @@ import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
 import { regionLabel } from '@/lib/regions'
 import PageHeader from '@/components/PageHeader.vue'
-import StatusPill from '@/components/StatusPill.vue'
-import EmptyState from '@/components/EmptyState.vue'
 
 const profileStore = useProfileStore()
 const message = useMessage()
@@ -326,10 +259,6 @@ const loadingTasks = ref(false)
 const taskActing = ref('')
 let pollTimer: number | null = null
 
-const showAttemptsModal = ref(false)
-const attemptsTask = ref<any>(null)
-const attempts = ref<any[]>([])
-const loadingAttempts = ref(false)
 
 // Project-style random names: adjective-noun-NN
 const ADJECTIVES = ['amber', 'brisk', 'calm', 'coral', 'crisp', 'dusk', 'ember', 'fern', 'frost', 'gale', 'glen', 'hazel', 'ivory', 'jade', 'lunar', 'maple', 'misty', 'nova', 'ocean', 'onyx', 'opal', 'pearl', 'pine', 'quiet', 'river', 'sage', 'slate', 'solar', 'storm', 'swift', 'terra', 'tidal', 'vivid', 'willow', 'zephyr']
@@ -369,6 +298,7 @@ const vpuOptions = [
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 const isA1 = computed(() => form.value.shape.includes('A1'))
+const activeTasks = computed(() => tasks.value.filter((t) => t.status === 'running' || t.status === 'creating'))
 
 const ocpuMarks = computed(() => {
   const m: Record<number, string> = {}
@@ -382,12 +312,7 @@ const memMarks = computed(() => {
 })
 
 const shortAD = (ad?: string) => (ad ? ad.replace(/^[^:]+:/, '') : '')
-const formatTime = (t: string) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '')
 
-const taskState = (s: string) => ({ running: 'RUNNING_TASK', creating: 'PROVISIONING', success: 'SUCCESS', stopped: 'STOPPED', failed: 'FAILED', idle: 'IDLE' })[s] || s
-const taskLabel = (s: string) => ({ running: '排队重试中', creating: '正在创建…', success: '已创建', stopped: '未排队', failed: '失败', idle: '空闲' })[s] || s
-const attemptState = (s: string) => ({ success: 'SUCCESS', fatal_error: 'FAILED', rate_limited: 'PENDING', capacity_full: 'STOPPED', transient_error: 'PENDING' })[s] || s
-const attemptLabel = (s: string) => ({ success: '成功', fatal_error: '致命错误', rate_limited: '被限流', capacity_full: '容量不足', transient_error: '临时错误' })[s] || s
 
 const generateRandomPassword = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#%^*_+-='
@@ -575,34 +500,6 @@ const fetchTasks = async () => {
   }
 }
 
-const openAttempts = async (task: any) => {
-  attemptsTask.value = task
-  attempts.value = []
-  showAttemptsModal.value = true
-  loadingAttempts.value = true
-  try {
-    const res: any = await api.get(`/tasks/attempts/${task.id}`)
-    attempts.value = res.attempts || []
-  } catch (e: any) {
-    message.error(e.message)
-  } finally {
-    loadingAttempts.value = false
-  }
-}
-
-const startTask = async (t: any) => {
-  taskActing.value = t.id
-  try {
-    const res: any = await api.post(`/tasks/start/${t.id}`)
-    message.success(res.message || '已加入排队')
-    await fetchTasks()
-  } catch (e: any) {
-    message.error(e.message)
-  } finally {
-    taskActing.value = ''
-  }
-}
-
 const stopTask = async (t: any) => {
   taskActing.value = t.id
   try {
@@ -614,24 +511,6 @@ const stopTask = async (t: any) => {
   } finally {
     taskActing.value = ''
   }
-}
-
-const deleteTask = (t: any) => {
-  dialog.error({
-    title: '删除记录',
-    content: `删除 ${t.instance_name} 的创建记录及其尝试历史？排队中的任务会先被停止。已创建的实例不受影响。`,
-    positiveText: '删除',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await api.delete(`/tasks/delete/${t.id}`)
-        message.success('记录已删除')
-        await fetchTasks()
-      } catch (e: any) {
-        message.error(e.message)
-      }
-    },
-  })
 }
 
 // ---------- create ----------
@@ -651,7 +530,7 @@ const askAutoRetry = (res: any) => {
       }
     },
     onNegativeClick: () => {
-      message.info('已保留创建记录，可随时在下方点「排队重试」')
+      message.info('已放弃，可重新点击「创建实例」再试')
     },
   })
 }
