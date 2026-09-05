@@ -557,47 +557,6 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 	return StrVal(resp.Ipv6.IpAddress), nil
 }
 
-// GetInstanceAddresses returns the lifecycle state and the primary VNIC's public IPv4 / IPv6
-// of one instance. The VNIC only becomes ATTACHED (and gets its public IP) while the instance
-// is starting, so callers poll this until the state is RUNNING.
-func GetInstanceAddresses(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (state, pubIP, ipv6 string, err error) {
-	computeClient, err := GetComputeClient(profile, region)
-	if err != nil {
-		return "", "", "", err
-	}
-	netClient, err := GetVirtualNetworkClient(profile, region)
-	if err != nil {
-		return "", "", "", err
-	}
-
-	instResp, err := computeClient.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(instanceOCID)})
-	if err != nil {
-		return "", "", "", err
-	}
-	state = string(instResp.Instance.LifecycleState)
-
-	if vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID); err == nil {
-		pubIP = StrVal(vnic.PublicIp)
-		if len(vnic.Ipv6Addresses) > 0 {
-			ipv6 = vnic.Ipv6Addresses[0]
-		}
-	}
-	return state, pubIP, ipv6, nil
-}
-
-// GetInstanceState returns only the lifecycle state (one GetInstance call).
-func GetInstanceState(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (string, error) {
-	computeClient, err := GetComputeClient(profile, region)
-	if err != nil {
-		return "", err
-	}
-	resp, err := computeClient.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(instanceOCID)})
-	if err != nil {
-		return "", err
-	}
-	return string(resp.Instance.LifecycleState), nil
-}
-
 // GetPrimaryVnicAddresses returns the primary VNIC's public IPv4 and first IPv6 address.
 func GetPrimaryVnicAddresses(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (pubIP, ipv6 string, err error) {
 	computeClient, err := GetComputeClient(profile, region)

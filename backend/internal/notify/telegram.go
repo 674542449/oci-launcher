@@ -86,26 +86,21 @@ func sendOrLog(kind, text string) {
 	}
 }
 
-// NotifyTaskSuccess sends the launch result once the instance is RUNNING (confirmed) or when it
-// exists but its running state could not be confirmed in time.
-func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, publicIP, ipv6, rootPass string, confirmed, sshOK bool, statusLine string) {
+// NotifyTaskSuccess sends the launch success notification (the instance OCID was returned).
+func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, publicIP, ipv6, rootPass string) {
 	ipText := publicIP
 	if ipText == "" {
 		ipText = "尚未分配，请稍后在实例页刷新"
 	}
-	title := "🎉 <b>OCI 实例创建成功</b>"
-	if !confirmed {
-		title = "⚠️ <b>OCI 实例已创建，运行状态未确认</b>"
-	}
 
-	text := fmt.Sprintf(`%s
+	text := fmt.Sprintf(`🎉 <b>OCI 实例创建成功</b>
 
 👤 <b>账号:</b> %s
 🏢 <b>区域:</b> %s
 🖥️ <b>实例:</b> %s
 ⚙️ <b>规格:</b> %s (%0.1f OCPU / %0.1f GB / %d GB 引导卷)
 🌐 <b>公网 IPv4:</b> <code>%s</code>
-`, title, esc(profile.Name), esc(task.Region), esc(task.InstanceName), esc(task.Shape), task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, esc(ipText))
+`, esc(profile.Name), esc(task.Region), esc(task.InstanceName), esc(task.Shape), task.OCPU, task.MemoryInGBs, task.BootVolumeSizeInGBs, esc(ipText))
 
 	if ipv6 != "" {
 		text += fmt.Sprintf("🌐 <b>IPv6:</b> <code>%s</code>\n", esc(ipv6))
@@ -114,32 +109,10 @@ func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, pu
 		text += fmt.Sprintf("🔑 <b>Root 密码:</b> <code>%s</code> <i>(同时保存在实例云端标签中)</i>\n", esc(rootPass))
 	}
 	if publicIP != "" {
-		text += fmt.Sprintf("\n💻 <b>登录:</b> <code>ssh root@%s</code>", esc(publicIP))
-		if sshOK {
-			text += "（22 端口已可连接）"
-		}
-		text += "\n"
-	}
-	if statusLine != "" {
-		text += fmt.Sprintf("\n📌 <i>%s</i>", esc(statusLine))
+		text += fmt.Sprintf("\n💻 <b>登录:</b> <code>ssh root@%s</code>\n", esc(publicIP))
 	}
 
 	sendOrLog("success", text)
-}
-
-// NotifyProvisionFailed alerts that OCI accepted the launch but terminated the instance while
-// provisioning it; the task is left retryable.
-func NotifyProvisionFailed(task *storage.LaunchTask, profile *storage.OCIProfile, reason string) {
-	text := fmt.Sprintf(`⚠️ <b>OCI 实例开通失败</b>
-
-👤 <b>账号:</b> %s
-🏢 <b>区域:</b> %s
-🖥️ <b>实例:</b> %s
-❌ <b>原因:</b> %s
-
-💡 <i>可在面板中点击「排队重试」，系统会换可用区自动重试。</i>`, esc(profile.Name), esc(task.Region), esc(task.InstanceName), esc(reason))
-
-	sendOrLog("provision_failed", text)
 }
 
 // NotifyTaskFatalError sends the fatal error alert

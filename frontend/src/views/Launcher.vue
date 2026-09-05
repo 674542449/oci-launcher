@@ -300,25 +300,21 @@ const vpuOptions = [
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 const isA1 = computed(() => form.value.shape.includes('A1'))
-// creating: synchronous LaunchInstance in flight · provisioning: accepted by OCI, not RUNNING yet
-// · running: queued retries. Only RUNNING instances make a task "success".
-const isActiveTask = (t: any) => t.status === 'running' || t.status === 'creating' || t.status === 'provisioning'
+// creating: synchronous LaunchInstance in flight · running: queued retries. A task is "success"
+// as soon as LaunchInstance returns an instance OCID.
+const isActiveTask = (t: any) => t.status === 'running' || t.status === 'creating'
 const activeTasks = computed(() => tasks.value.filter(isActiveTask))
-const taskStripLabel = (t: any) => {
-  if (t.status === 'creating') return '正在创建…'
-  if (t.status === 'provisioning') return 'OCI 已接受，正在开通（通常 1–3 分钟）'
-  return '排队重试中'
-}
+const taskStripLabel = (t: any) => (t.status === 'creating' ? '正在创建…' : '排队重试中')
 
-// The task whose final outcome gets announced on this page: the one just created here, or an
-// active one found while polling. Cleared once announced or when the user stops/clears it.
+// The active task (queued retries, or a create in flight elsewhere) whose final outcome gets
+// announced on this page. Cleared once announced or when the user stops/clears it.
 const watchedTaskId = ref('')
 const watchedPrevStatus = ref('')
 const announceOutcome = (t: any) => {
   if (t.status === 'success') {
     dialog.success({
-      title: '实例已进入运行状态',
-      content: `${t.instance_name}：${t.last_message || '已进入运行状态'}`,
+      title: '实例创建成功',
+      content: `${t.instance_name}：${t.last_message || '已在 OCI 创建成功'}`,
       positiveText: '知道了',
     })
   } else if (t.status === 'failed') {
@@ -618,16 +614,12 @@ const submitTask = async (submittedName: string) => {
       },
       { timeout: 200000 },
     )
-    if (res.result === 'created') {
-      watchedTaskId.value = res.task_id
-      watchedPrevStatus.value = 'provisioning'
-    }
     await fetchTasks()
 
     if (res.result === 'created') {
-      dialog.info({
-        title: res.existed ? '实例已存在' : 'OCI 已接受创建请求',
-        content: `${submittedName} ${res.existed ? '在云端已存在，正在确认其运行状态' : '正在开通，通常 1–3 分钟后进入运行状态'}。结果会在本页提示，也可在「实例」页查看。`,
+      dialog.success({
+        title: res.existed ? '实例已存在' : '实例创建成功',
+        content: `${submittedName} 已在 OCI 创建成功${res.existed ? '（云端已有同名实例）' : '，已返回实例 OCID'}。公网 IP 分配后会显示在「实例」页。`,
         positiveText: '知道了',
       })
       form.value.instance_name = randomInstanceName()

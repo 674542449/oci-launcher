@@ -84,10 +84,10 @@ func StopTask(taskID uuid.UUID) {
 			"last_message": "用户手动停止排队",
 		}).Error
 
-	// A record in the "creating" / "provisioning" states can be cleared by the user as well;
+	// A record stuck in the synchronous "creating" state can be cleared by the user as well;
 	// if the create flow is in fact still running, its own final write wins afterwards.
 	_ = storage.DB.Model(&storage.LaunchTask{}).
-		Where("id = ? AND status IN ?", taskID, []string{"creating", "provisioning"}).
+		Where("id = ? AND status = ?", taskID, "creating").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
 			"last_message": "用户手动清除，请到「实例」页确认结果",
@@ -103,17 +103,6 @@ func ResumeAllRunningTasks() {
 			"status":       "stopped",
 			"last_message": "服务重启时创建被中断，可点击「重试」重新排队",
 		}).Error
-
-	// Instances that were accepted before the restart most likely exist: pick up the RUNNING wait.
-	var provisioning []storage.LaunchTask
-	if err := storage.DB.Where("status = ? AND success_instance_ocid <> ''", "provisioning").Find(&provisioning).Error; err == nil {
-		for _, t := range provisioning {
-			ResumeProvisioning(t)
-		}
-	}
-	_ = storage.DB.Model(&storage.LaunchTask{}).
-		Where("status = ? AND success_instance_ocid = ''", "provisioning").
-		Updates(map[string]interface{}{"status": "stopped", "last_message": "服务重启时开通被中断，请到「实例」页确认结果"}).Error
 
 	var tasks []storage.LaunchTask
 	if err := storage.DB.Where("status = ?", "running").Find(&tasks).Error; err == nil {

@@ -33,16 +33,13 @@ type LiveLogMessage struct {
 }
 
 const (
-	retryWaitMinSecs       = 60
-	retryWaitMaxSecs       = 180
-	maxBackoffFactor       = 8
-	instanceRunningTimeout = 10 * time.Minute // accepted -> RUNNING
-	instanceIPTimeout      = 5 * time.Minute  // RUNNING -> public IPv4 visible on the VNIC
-	instanceReadyInterval  = 10 * time.Second
-	sshProbeWindow         = 90 * time.Second // informational TCP/22 probe after RUNNING
-	sshProbeInterval       = 10 * time.Second
-	// ProvisionWatchTimeout bounds one FinalizeLaunch run (state wait + IP wait + probe).
-	ProvisionWatchTimeout = 20 * time.Minute
+	retryWaitMinSecs      = 60
+	retryWaitMaxSecs      = 180
+	maxBackoffFactor      = 8
+	instanceIPTimeout     = 5 * time.Minute // how long to wait for a requested public IPv4
+	instanceReadyInterval = 10 * time.Second
+	// AddressWatchTimeout bounds one background FinalizeSuccess run.
+	AddressWatchTimeout = 6 * time.Minute
 )
 
 // AttemptResult is the outcome of one LaunchInstance attempt.
@@ -214,7 +211,7 @@ func AttemptLaunch(ctx context.Context, profile *storage.OCIProfile, task *stora
 	if launchErr == nil && instanceOCID != "" {
 		res.Success, res.InstanceOCID = true, instanceOCID
 		recordAttempt(task.ID, attemptNum, task.Region, targetAD, "success", "创建实例成功 (Instance Launched)", res.DurationMs)
-		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "SUCCESS", "OCI 已接受创建请求，等待实例进入运行状态…", res.DurationMs)
+		emitLog(task.ID.String(), attemptNum, task.Region, targetAD, "SUCCESS", "实例创建成功（已返回实例 OCID），正在获取公网 IP…", res.DurationMs)
 		return res
 	}
 
@@ -245,61 +242,22 @@ func shortAD(ad string) string {
 	return ad
 }
 
-// LaunchOutcome is what FinalizeLaunch found out about an accepted LaunchInstance request.
-type LaunchOutcome int
-
-const (
-	OutcomeRunning         LaunchOutcome = iota // the instance reached RUNNING: a real success
-	OutcomeProvisionFailed                      // Oracle terminated it while provisioning
-	OutcomeUnconfirmed                          // it exists but never reached RUNNING in time
-	OutcomeCancelled                            // context cancelled (stop / shutdown)
-)
-
-// ProvisioningFields is the task update written the moment OCI accepts a launch request: the
-// instance exists but is not RUNNING yet, so the task is "provisioning", not "success".
-func ProvisioningFields(instanceOCID string, existed bool) map[string]interface{} {
-	msg := "OCI 已接受创建请求，正在开通（通常 1–3 分钟）"
+// SuccessFields is the task update written the moment LaunchInstance returns an instance OCID:
+// that is the success criterion, nothing after it changes the status.
+func SuccessFields(instanceOCID string, existed bool) map[string]interface{} {
+	msg := "实例创建成功，正在获取公网 IP"
 	if existed {
-		msg = "云端已存在同名实例，正在确认其运行状态"
+		msg = "云端已存在同名实例，视为创建成功"
 	}
 	return map[string]interface{}{
-		"status":                "provisioning",
+		"status":                "success",
 		"success_instance_ocid": instanceOCID,
 		"last_message":          msg,
 	}
 }
 
-// waitForRunning polls the lifecycle state (one GetInstance per tick) until the instance is
-// RUNNING or STOPPED, is being terminated, or instanceRunningTimeout passes.
-func waitForRunning(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (state string, terminated bool) {
-	deadline := time.Now().Add(instanceRunningTimeout)
-	notFound := 0
-	for {
-		s, err := oci.GetInstanceState(ctx, profile, region, instanceOCID)
-		switch {
-		case err == nil:
-			state = s
-			switch s {
-			case string(core.InstanceLifecycleStateRunning), string(core.InstanceLifecycleStateStopped):
-				return state, false
-			case string(core.InstanceLifecycleStateTerminating), string(core.InstanceLifecycleStateTerminated):
-				return state, true
-			}
-		case oci.IsNotFoundError(err):
-			// A fresh instance can 404 for a moment; three in a row means it is gone.
-			notFound++
-			if notFound >= 3 {
-				return string(core.InstanceLifecycleStateTerminated), true
-			}
-		}
-		if time.Now().After(deadline) || !sleepCtx(ctx, instanceReadyInterval) {
-			return state, false
-		}
-	}
-}
-
 // waitForPublicIP reads the primary VNIC's addresses; when a public IPv4 was requested it keeps
-// polling for it up to instanceIPTimeout.
+// polling for it up to instanceIPTimeout (the VNIC appears a few seconds after acceptance).
 func waitForPublicIP(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string, wantPublicIP bool) (pubIP, ipv6 string) {
 	deadline := time.Now().Add(instanceIPTimeout)
 	for {
@@ -316,118 +274,32 @@ func waitForPublicIP(ctx context.Context, profile *storage.OCIProfile, region, i
 	}
 }
 
-// probeSSH reports whether TCP/22 answers within sshProbeWindow. Informational only: a closed
-// security list and a still-booting OS look the same from here, so silence is not a failure.
-func probeSSH(ctx context.Context, ip string) bool {
-	deadline := time.Now().Add(sshProbeWindow)
-	for {
-		if oci.ProbeIPPort(ip, 22, 3*time.Second) {
-			return true
-		}
-		if time.Now().After(deadline) || !sleepCtx(ctx, sshProbeInterval) {
-			return false
-		}
-	}
-}
-
-// FinalizeLaunch follows an accepted LaunchInstance request through to RUNNING. Only then does
-// the task become "success" (with its addresses). An instance Oracle terminates while
-// provisioning is reported as OutcomeProvisionFailed and the caller decides how to retry; an
-// instance that exists but never reaches RUNNING is recorded as success with an explicit
-// caveat, because retrying would risk a duplicate. Safe to run in its own goroutine.
-func FinalizeLaunch(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, res AttemptResult, attemptNum int, rootPassword string) LaunchOutcome {
-	state, terminated := waitForRunning(ctx, profile, task.Region, res.InstanceOCID)
+// FinalizeSuccess runs after the task has already been marked success: it looks up the new
+// instance's addresses, stores them on the task and sends the notification. It never changes
+// the task status. Safe to run in its own goroutine with a background context.
+func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *storage.LaunchTask, res AttemptResult, attemptNum int, rootPassword string) {
+	pubIP, ipv6 := waitForPublicIP(ctx, profile, task.Region, res.InstanceOCID, task.AssignPublicIP)
 	if ctx.Err() != nil {
-		return OutcomeCancelled
-	}
-	if terminated {
-		reason := fmt.Sprintf("实例在开通阶段被 Oracle 终止（状态 %s），通常是容量或引导卷问题", state)
-		recordAttempt(task.ID, attemptNum, task.Region, res.AD, "provision_failed", reason, 0)
-		emitLog(task.ID.String(), attemptNum, task.Region, res.AD, "RETRY", reason, 0)
-		return OutcomeProvisionFailed
-	}
-
-	outcome := OutcomeRunning
-	pubIP, ipv6 := "", ""
-	var msg string
-	switch state {
-	case string(core.InstanceLifecycleStateRunning):
-		pubIP, ipv6 = waitForPublicIP(ctx, profile, task.Region, res.InstanceOCID, task.AssignPublicIP)
-		msg = "实例已进入运行状态"
-		if res.AlreadyExisted {
-			msg = "云端已存在同名实例，且已在运行"
-		}
-		if pubIP != "" {
-			msg += "，公网 IP " + pubIP
-		} else if task.AssignPublicIP {
-			msg += "，公网 IP 尚未分配，可稍后在「实例」页刷新"
-		}
-	case string(core.InstanceLifecycleStateStopped):
-		outcome = OutcomeUnconfirmed
-		msg = "实例已存在但处于 STOPPED 状态，请到「实例」页启动"
-	default:
-		outcome = OutcomeUnconfirmed
-		if state == "" {
-			state = "未知"
-		}
-		msg = fmt.Sprintf("实例已创建，但 %d 分钟内未进入运行状态（当前 %s），请到「实例」页确认", int(instanceRunningTimeout.Minutes()), state)
-	}
-	if ctx.Err() != nil {
-		return OutcomeCancelled
-	}
-
-	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
-		"status":                "success",
-		"success_instance_ocid": res.InstanceOCID,
-		"success_public_ip":     pubIP,
-		"success_ipv6":          ipv6,
-		"last_message":          msg,
-	})
-	emitLog(task.ID.String(), attemptNum, task.Region, res.AD, "SUCCESS", fmt.Sprintf("%s。实例 OCID: %s", msg, res.InstanceOCID), 0)
-
-	sshOK := false
-	if outcome == OutcomeRunning && pubIP != "" && probeSSH(ctx, pubIP) {
-		sshOK = true
-		msg += "，SSH(22) 已可连接"
-		storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Update("last_message", msg)
-	}
-	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword, outcome == OutcomeRunning, sshOK, msg)
-	return outcome
-}
-
-// MarkProvisionFailed records a provisioning failure on a task no worker is retrying (the
-// synchronous create, or a task resumed after a restart): retryable "stopped" plus an alert.
-func MarkProvisionFailed(task *storage.LaunchTask, profile *storage.OCIProfile) {
-	reason := "实例开通失败：Oracle 在开通阶段终止了实例（多为容量或引导卷问题），可排队自动重试"
-	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
-		"status":                "stopped",
-		"success_instance_ocid": "",
-		"last_message":          reason,
-	})
-	notify.NotifyProvisionFailed(task, profile, reason)
-}
-
-// ResumeProvisioning re-attaches the RUNNING wait to a task that was mid-provisioning when the
-// service restarted, instead of abandoning an instance that most likely exists.
-func ResumeProvisioning(task storage.LaunchTask) {
-	var profile storage.OCIProfile
-	if err := storage.DB.First(&profile, "id = ?", task.ProfileID).Error; err != nil {
-		setTaskStatus(task.ID, "stopped", "服务重启后找不到关联账号，请到「实例」页确认结果")
 		return
 	}
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[Engine] ResumeProvisioning panic for %s: %v", task.ID, r)
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), ProvisionWatchTimeout)
-		defer cancel()
-		res := AttemptResult{Success: true, InstanceOCID: task.SuccessInstanceOCID}
-		if FinalizeLaunch(ctx, &profile, &task, res, task.CurrentRetries, DecryptTaskRootPassword(task.RootPasswordEnc)) == OutcomeProvisionFailed {
-			MarkProvisionFailed(&task, &profile)
-		}
-	}()
+
+	msg := "实例创建成功"
+	if res.AlreadyExisted {
+		msg = "云端已存在同名实例，视为创建成功"
+	}
+	if pubIP != "" {
+		msg += "，公网 IP " + pubIP
+	} else if task.AssignPublicIP {
+		msg += "，公网 IP 尚未分配，可稍后在「实例」页刷新"
+	}
+
+	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"success_public_ip": pubIP,
+		"success_ipv6":      ipv6,
+		"last_message":      msg,
+	})
+	emitLog(task.ID.String(), attemptNum, task.Region, res.AD, "SUCCESS", fmt.Sprintf("%s。实例 OCID: %s", msg, res.InstanceOCID), 0)
+	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword)
 }
 
 // RunTaskWorker is the queued retry loop: it keeps attempting LaunchInstance, rotating through
@@ -513,21 +385,10 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 		}
 
 		if res.Success {
-			storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Updates(ProvisioningFields(res.InstanceOCID, res.AlreadyExisted))
-			if FinalizeLaunch(ctx, &profile, &currentTask, res, attemptNum, rootPassword) != OutcomeProvisionFailed {
-				return
-			}
-			// Oracle terminated the instance while provisioning: keep queueing, next AD.
-			wait := RandomRetryWait()
-			storage.DB.Model(&storage.LaunchTask{}).Where("id = ? AND status = ?", taskID, "provisioning").Updates(map[string]interface{}{
-				"status":                "running",
-				"success_instance_ocid": "",
-				"last_message":          fmt.Sprintf("实例开通阶段被 Oracle 终止，%d 秒后换可用区重试", int(wait.Seconds())),
-			})
-			if !sleepCtx(ctx, wait) {
-				return
-			}
-			continue
+			// The OCID is the success criterion; addresses and the notification follow.
+			storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Updates(SuccessFields(res.InstanceOCID, res.AlreadyExisted))
+			FinalizeSuccess(ctx, &profile, &currentTask, res, attemptNum, rootPassword)
+			return
 		}
 
 		var wait time.Duration
