@@ -57,10 +57,10 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*Accou
 		resp, err2 := subClient.ListSubscriptions(ctx, req)
 		if err2 == nil && len(resp.Items) > 0 {
 			firstSub := resp.Items[0]
-			subType := strings.ToUpper(common.StringToEmptyString(firstSub.Type))
+			subType := strings.ToUpper(StrVal(firstSub.Type))
 			if subType != "" {
 				info.DetectedType = subType
-				info.DetectionReason = fmt.Sprintf("官方 OneSubscription API 认证: Type = %s (计划编号: %s)", subType, common.StringToEmptyString(firstSub.PlanNumber))
+				info.DetectionReason = fmt.Sprintf("官方 OneSubscription API 认证: Type = %s (计划编号: %s)", subType, StrVal(firstSub.PlanNumber))
 			}
 		}
 	}
@@ -75,7 +75,7 @@ func DetectAccountType(ctx context.Context, profile *storage.OCIProfile) (*Accou
 		resp, err2 := limitsClient.ListLimitValues(ctx, req)
 		if err2 == nil {
 			for _, item := range resp.Items {
-				name := common.StringToEmptyString(item.Name)
+				name := StrVal(item.Name)
 				if name == "standard-a1-core-count" && item.Value != nil {
 					info.A1CoreLimit = *item.Value
 				}
@@ -208,7 +208,7 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 				continue
 			}
 
-			shape := common.StringToEmptyString(inst.Shape)
+			shape := StrVal(inst.Shape)
 			if strings.Contains(shape, "A1.Flex") {
 				if inst.ShapeConfig != nil {
 					if inst.ShapeConfig.Ocpus != nil {
