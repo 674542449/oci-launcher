@@ -7,6 +7,7 @@ import (
 
 	"oci-panel/internal/auth"
 	"oci-panel/internal/cache"
+	"oci-panel/internal/config"
 	"oci-panel/internal/engine"
 	"oci-panel/internal/security"
 	"oci-panel/internal/storage"
