@@ -5,11 +5,8 @@ WORKDIR /app
 
 RUN apk add --no-cache git ca-certificates tzdata
 
-COPY go.mod go.sum* ./
-RUN go mod download || true
-
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o oci-server ./cmd/server
+RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o oci-server ./cmd/server
 
 FROM alpine:3.19
 
