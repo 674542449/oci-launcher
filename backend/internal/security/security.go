@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"oci-panel/internal/cache"
-	"oci-panel/internal/config"
 	"oci-panel/internal/storage"
 
 	"github.com/gin-gonic/gin"
