@@ -1,21 +1,29 @@
 <template>
   <div>
-    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队，系统每 60–180 秒随机重试一次，直到创建成功。">
-      <template #actions>
-        <n-button secondary :loading="vcnCreating" :disabled="!currentProfile" @click="handleCreateDefaultVCN">
+    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队，系统每 60–180 秒随机重试一次，直到创建成功。" />
+
+    <!-- No VCN yet -->
+    <div v-if="!loadingNets && netsLoaded && vcnOptions.length === 0" class="notice notice-warn mb-6 items-center">
+      <n-icon size="18" class="shrink-0"><WarningOutline /></n-icon>
+      <div class="flex flex-1 flex-wrap items-center justify-between gap-3">
+        <span>这个账号在当前区域还没有虚拟云网络（VCN），创建实例前需要先建一个。推荐网络包含公共子网、互联网网关、IPv6 和常用端口放行。</span>
+        <n-button type="primary" size="small" :loading="vcnCreating" @click="handleCreateDefaultVCN">
           <template #icon><n-icon><GlobeOutline /></n-icon></template>
           一键创建推荐 VCN
         </n-button>
-      </template>
-    </PageHeader>
+      </div>
+    </div>
 
     <!-- ===== Presets ===== -->
     <section v-if="presets.length" class="mb-6">
-      <div class="mb-2 flex items-baseline justify-between">
+      <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
         <h2 class="section-title">免费额度预设</h2>
-        <span class="caption">点击填入下方表单</span>
+        <span class="caption">
+          当前账号：<b class="text-ink">{{ accountType === 'payg' ? '升级号' : '免费号' }}</b>，ARM 免费额度
+          <b class="mono text-ink">{{ allowance.ocpu }} OCPU / {{ allowance.memory_gb }} GB</b>
+        </span>
       </div>
-      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <button
           v-for="preset in presets"
           :key="preset.id"
@@ -24,205 +32,166 @@
           :class="selectedPresetId === preset.id ? '!border-brand ring-2 ring-brand/20' : ''"
           @click="applyPreset(preset)"
         >
-          <div class="truncate text-[13px] font-semibold text-ink">{{ preset.name }}</div>
-          <div class="mono mt-1 text-xs text-ink-2">{{ preset.shape.includes('A1') ? 'ARM A1' : 'AMD E2 Micro' }} · {{ preset.ocpu }}C / {{ preset.memory_in_gbs }}G</div>
-          <div class="mono mt-0.5 text-xs text-ink-3">{{ preset.boot_volume_size_in_gbs }} GB · {{ preset.boot_volume_vpu || 120 }} VPU<span v-if="preset.enable_ipv6"> · IPv6</span></div>
+          <div class="flex items-center justify-between gap-2">
+            <span class="truncate text-[13px] font-semibold text-ink">{{ preset.name }}</span>
+            <span v-if="preset.is_max" class="pill pill-info">满配</span>
+          </div>
+          <div class="mono mt-1 text-xs text-ink-2">{{ preset.shape.includes('A1') ? 'ARM Ampere A1' : 'AMD E2.1 Micro' }}</div>
+          <div class="mono mt-0.5 text-xs text-ink-3">{{ preset.ocpu }} OCPU · {{ preset.memory_in_gbs }} GB · {{ preset.boot_volume_size_in_gbs }} GB 引导卷<span v-if="preset.enable_ipv6"> · IPv6</span></div>
         </button>
       </div>
     </section>
 
-    <div class="grid grid-cols-1 gap-6 xl:grid-cols-5">
-      <!-- ===== Form ===== -->
-      <section class="card card-pad xl:col-span-3">
-        <n-form label-placement="top" :show-feedback="false" @submit.prevent="handleCreateTask">
-          <div class="space-y-7">
-            <!-- 规格 -->
-            <fieldset class="space-y-4">
-              <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">规格</legend>
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <n-form-item label="实例名称">
-                  <n-input v-model:value="form.instance_name" placeholder="留空则自动生成" :input-props="{ spellcheck: 'false' }" class="mono">
-                    <template #suffix>
-                      <button type="button" class="txt-btn-muted" title="换一个随机名称" @click="form.instance_name = randomInstanceName()">换一个</button>
-                    </template>
-                  </n-input>
-                </n-form-item>
-                <n-form-item label="Shape">
-                  <n-select v-model:value="form.shape" :options="shapeOptions" @update:value="onShapeChange" />
-                </n-form-item>
-              </div>
-              <p class="caption -mt-2">名称随机生成，同名实例已存在时不会重复创建。</p>
-
-              <div v-if="isA1" class="grid grid-cols-1 gap-5 rounded-lg border border-line bg-surface-2 p-4 sm:grid-cols-2">
-                <div>
-                  <div class="mb-1.5 flex items-center justify-between">
-                    <span class="label mb-0">OCPU</span>
-                    <span class="mono text-sm font-semibold text-ink">{{ form.ocpu }} 核</span>
-                  </div>
-                  <n-slider v-model:value="form.ocpu" :min="1" :max="4" :step="1" :marks="{ 1: '1', 2: '2', 3: '3', 4: '4' }" />
-                </div>
-                <div>
-                  <div class="mb-1.5 flex items-center justify-between">
-                    <span class="label mb-0">内存</span>
-                    <span class="mono text-sm font-semibold text-ink">{{ form.memory_in_gbs }} GB</span>
-                  </div>
-                  <n-slider v-model:value="form.memory_in_gbs" :min="1" :max="24" :step="1" :marks="{ 6: '6', 12: '12', 18: '18', 24: '24' }" />
-                </div>
-                <p class="caption sm:col-span-2">免费号最多 2 OCPU / 12 GB，升级号最多 4 OCPU / 24 GB；每 OCPU 建议搭配 6 GB 内存。</p>
-              </div>
-              <p v-else class="caption">VM.Standard.E2.1.Micro 固定 1 OCPU / 1 GB，免费额度最多 2 台。</p>
-            </fieldset>
-
-            <!-- 镜像与可用区 -->
-            <fieldset class="space-y-4">
-              <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">镜像与可用区</legend>
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <n-form-item label="Ubuntu 镜像">
-                  <n-select v-model:value="form.image_ocid" :options="imageOptions" :loading="loadingImages" placeholder="正在读取最新两代 LTS 镜像…" />
-                </n-form-item>
-                <n-form-item label="可用区">
-                  <n-select v-model:value="form.ad_list" multiple :options="adOptions" :loading="loadingADs" placeholder="留空则依次尝试全部可用区" max-tag-count="responsive" />
-                </n-form-item>
-              </div>
-              <p class="caption -mt-2">镜像按 Shape 架构自动筛选：A1 用 aarch64，E2 Micro 用 x86_64。</p>
-            </fieldset>
-
-            <!-- 引导卷 -->
-            <fieldset class="space-y-4">
-              <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">引导卷</legend>
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <n-form-item label="容量（GB）">
-                  <n-input-number v-model:value="form.boot_volume_size_in_gbs" :min="50" :max="200" :step="10" class="w-full" />
-                </n-form-item>
-                <n-form-item label="性能档位">
-                  <n-select v-model:value="form.boot_volume_vpu" :options="vpuOptions" />
-                </n-form-item>
-              </div>
-              <p class="caption -mt-2">引导卷与块存储合计免费 200 GB。高于 10 VPU 的档位在已升级账号上会按 VPU 计费。</p>
-            </fieldset>
-
-            <!-- 网络 -->
-            <fieldset class="space-y-4">
-              <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">网络</legend>
-              <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                <n-form-item label="VCN">
-                  <n-select v-model:value="selectedVCN" :options="vcnOptions" :loading="loadingNets" placeholder="选择 VCN" @update:value="onVCNChange" />
-                </n-form-item>
-                <n-form-item label="子网">
-                  <n-select v-model:value="form.subnet_ocid" :options="subnetOptions" placeholder="选择子网" :disabled="!selectedVCN" />
-                </n-form-item>
-              </div>
-              <div class="flex flex-wrap gap-x-6 gap-y-2">
-                <n-checkbox v-model:checked="form.assign_public_ip">分配公网 IPv4</n-checkbox>
-                <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 并放通防火墙</n-checkbox>
-              </div>
-            </fieldset>
-
-            <!-- 登录方式 -->
-            <fieldset class="space-y-3">
-              <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">登录方式</legend>
-              <n-radio-group v-model:value="form.login_mode" name="loginMode">
-                <n-space :size="20">
-                  <n-radio value="root_key">root + SSH 密钥</n-radio>
-                  <n-radio value="root_password">root + 随机密码</n-radio>
-                </n-space>
-              </n-radio-group>
-              <div v-if="form.login_mode === 'root_key'" class="space-y-2">
-                <n-input
-                  v-model:value="form.ssh_authorized_keys"
-                  type="textarea"
-                  class="mono"
-                  placeholder="粘贴 SSH 公钥（ssh-ed25519 … 或 ssh-rsa …），或从文件导入"
-                  :rows="3"
-                  :input-props="{ spellcheck: 'false' }"
-                />
-                <div class="flex flex-wrap items-center gap-3">
-                  <n-button secondary size="small" @click="keyFileInput?.click()">
-                    <template #icon><n-icon><CloudUploadOutline /></n-icon></template>
-                    从文件导入公钥
-                  </n-button>
-                  <span v-if="keyFileName" class="caption">已导入 {{ keyFileName }}</span>
-                  <input ref="keyFileInput" type="file" accept=".pub,.txt,.pem,text/plain" class="sr-only" @change="onKeyFileSelected" />
-                </div>
-              </div>
-              <div v-else class="space-y-2">
-                <div class="flex flex-col gap-2 sm:flex-row">
-                  <n-input v-model:value="form.root_password" class="mono flex-1" placeholder="20 位随机密码" :input-props="{ spellcheck: 'false', autocomplete: 'off' }" />
-                  <div class="flex gap-2">
-                    <n-button secondary @click="generateRandomPassword">
-                      <template #icon><n-icon><RefreshOutline /></n-icon></template>
-                      重新生成
-                    </n-button>
-                    <n-button secondary @click="copyPassword">
-                      <template #icon><n-icon><CopyOutline /></n-icon></template>
-                      复制
-                    </n-button>
-                  </div>
-                </div>
-                <p class="caption">创建后密码会写入实例的云端标签 <code class="mono">root_password</code>，可在「实例」页查看与修改。</p>
-              </div>
-            </fieldset>
-
-            <div class="flex flex-col gap-3 border-t border-line pt-5 sm:flex-row sm:items-center sm:justify-between">
-              <span class="caption">点击后立即向 OCI 发起创建；同一时间只允许操作一个账号，创建前会校验免费额度。</span>
-              <n-button type="primary" size="large" attr-type="submit" :loading="launching" :disabled="!currentProfile">
-                <template #icon><n-icon><RocketOutline /></n-icon></template>
-                {{ launching ? '正在创建…' : '创建实例' }}
-              </n-button>
+    <!-- ===== Form ===== -->
+    <section class="card card-pad">
+      <n-form label-placement="top" :show-feedback="false" @submit.prevent="handleCreateTask">
+        <div class="space-y-7">
+          <!-- 规格 -->
+          <fieldset class="space-y-4">
+            <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">规格</legend>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <n-form-item label="实例名称">
+                <n-input v-model:value="form.instance_name" placeholder="留空则自动生成" :input-props="{ spellcheck: 'false' }" class="mono">
+                  <template #suffix>
+                    <button type="button" class="txt-btn-muted" title="换一个随机名称" @click="form.instance_name = randomInstanceName()">换一个</button>
+                  </template>
+                </n-input>
+              </n-form-item>
+              <n-form-item label="Shape">
+                <n-select v-model:value="form.shape" :options="shapeOptions" @update:value="onShapeChange" />
+              </n-form-item>
             </div>
-          </div>
-        </n-form>
-      </section>
+            <p class="caption -mt-2">名称随机生成，同名实例已存在时不会重复创建。</p>
 
-      <!-- ===== Live log ===== -->
-      <section ref="terminalSection" class="term flex min-h-[440px] flex-col rounded-xl xl:sticky xl:top-8 xl:col-span-2 xl:max-h-[calc(100vh-4rem)]">
-        <div class="flex items-center justify-between gap-3 border-b border-side-2 px-4 py-3">
-          <div class="flex min-w-0 items-center gap-2.5">
-            <span class="relative flex h-2.5 w-2.5 shrink-0">
-              <span v-if="wsConnected" class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60"></span>
-              <span class="relative inline-flex h-2.5 w-2.5 rounded-full" :class="wsConnected ? 'bg-emerald-400' : 'bg-side-3'"></span>
-            </span>
-            <span class="text-[13px] font-semibold">实时日志</span>
-            <span v-if="activeTask" class="mono truncate text-xs text-side-muted">{{ activeTask.instance_name }}</span>
-          </div>
-          <button type="button" class="text-xs text-side-muted transition-colors hover:text-side-ink" :disabled="logMessages.length === 0" @click="logMessages = []">清空</button>
-        </div>
-
-        <div ref="terminalBody" class="mono flex-1 overflow-y-auto px-3 py-2 text-xs" aria-live="polite">
-          <div v-if="logMessages.length === 0" class="flex h-full flex-col items-center justify-center gap-1 py-16 text-center text-side-muted">
-            <n-icon size="22" class="mb-1 opacity-60"><TerminalOutline /></n-icon>
-            <span>{{ activeTask ? '等待新的记录…' : '创建实例后，每次尝试的结果会实时显示在这里。' }}</span>
-            <span class="text-[11px] opacity-70">也可以在下方创建记录点「查看日志」</span>
-          </div>
-          <ol v-else class="space-y-1">
-            <li v-for="(msg, idx) in logMessages" :key="idx" class="rounded-md px-2 py-1.5 leading-5 hover:bg-side-2/70">
-              <div class="flex flex-wrap items-center gap-x-2 text-side-muted">
-                <span>{{ formatLogTime(msg.timestamp) }}</span>
-                <span v-if="msg.attempt_num">#{{ msg.attempt_num }}</span>
-                <span v-if="msg.ad" class="truncate">{{ shortAD(msg.ad) }}</span>
-                <span v-if="msg.duration_ms" class="ml-auto">{{ msg.duration_ms }} ms</span>
+            <div v-if="isA1" class="grid grid-cols-1 gap-5 rounded-lg border border-line bg-surface-2 p-4 sm:grid-cols-2">
+              <div>
+                <div class="mb-1.5 flex items-center justify-between">
+                  <span class="label mb-0">OCPU</span>
+                  <span class="mono text-sm font-semibold text-ink">{{ form.ocpu }} 核</span>
+                </div>
+                <n-slider v-model:value="form.ocpu" :min="1" :max="allowance.ocpu" :step="1" :marks="ocpuMarks" />
               </div>
-              <div class="mt-0.5 flex items-start gap-2">
-                <span class="mt-[3px] h-1.5 w-1.5 shrink-0 rounded-full" :class="logDot(msg.status)"></span>
-                <span class="break-words" :class="logText(msg.status)">{{ msg.message }}</span>
+              <div>
+                <div class="mb-1.5 flex items-center justify-between">
+                  <span class="label mb-0">内存</span>
+                  <span class="mono text-sm font-semibold text-ink">{{ form.memory_in_gbs }} GB</span>
+                </div>
+                <n-slider v-model:value="form.memory_in_gbs" :min="1" :max="allowance.memory_gb" :step="1" :marks="memMarks" />
               </div>
-            </li>
-          </ol>
-        </div>
+              <p class="caption sm:col-span-2">
+                {{ accountType === 'payg' ? '升级号' : '免费号' }}最多 {{ allowance.ocpu }} OCPU / {{ allowance.memory_gb }} GB，每 OCPU 建议搭配 6 GB 内存。
+              </p>
+            </div>
+            <p v-else class="caption">VM.Standard.E2.1.Micro 固定 1 OCPU / 1 GB，免费额度最多 2 台。</p>
+          </fieldset>
 
-        <div class="flex items-center justify-between border-t border-side-2 px-4 py-2 text-[11px] text-side-muted">
-          <span>{{ wsConnected ? '已连接' : '未连接' }}</span>
-          <span>{{ logMessages.length }} 条</span>
+          <!-- 镜像与可用区 -->
+          <fieldset class="space-y-4">
+            <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">镜像与可用区</legend>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <n-form-item label="Ubuntu 镜像">
+                <n-select v-model:value="form.image_ocid" :options="imageOptions" :loading="loadingImages" placeholder="正在读取最新两代 LTS 镜像…" />
+              </n-form-item>
+              <n-form-item label="可用区">
+                <n-select v-model:value="form.ad_list" multiple :options="adOptions" :loading="loadingADs" placeholder="留空则依次尝试全部可用区" max-tag-count="responsive" />
+              </n-form-item>
+            </div>
+            <p class="caption -mt-2">镜像按 Shape 架构自动筛选：A1 用 aarch64，E2 Micro 用 x86_64。</p>
+          </fieldset>
+
+          <!-- 引导卷 -->
+          <fieldset class="space-y-4">
+            <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">引导卷</legend>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <n-form-item label="容量（GB）">
+                <n-input-number v-model:value="form.boot_volume_size_in_gbs" :min="50" :max="200" :step="10" class="w-full" />
+              </n-form-item>
+              <n-form-item label="性能档位">
+                <n-select v-model:value="form.boot_volume_vpu" :options="vpuOptions" />
+              </n-form-item>
+            </div>
+            <p class="caption -mt-2">引导卷与块存储合计免费 200 GB。高于 10 VPU 的档位在已升级账号上会按 VPU 计费。</p>
+          </fieldset>
+
+          <!-- 网络 -->
+          <fieldset class="space-y-4">
+            <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">网络</legend>
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <n-form-item label="VCN">
+                <n-select v-model:value="selectedVCN" :options="vcnOptions" :loading="loadingNets" placeholder="选择 VCN" @update:value="onVCNChange" />
+              </n-form-item>
+              <n-form-item label="子网">
+                <n-select v-model:value="form.subnet_ocid" :options="subnetOptions" placeholder="选择子网" :disabled="!selectedVCN" />
+              </n-form-item>
+            </div>
+            <div class="flex flex-wrap gap-x-6 gap-y-2">
+              <n-checkbox v-model:checked="form.assign_public_ip">分配公网 IPv4</n-checkbox>
+              <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 并放通防火墙</n-checkbox>
+            </div>
+          </fieldset>
+
+          <!-- 登录方式 -->
+          <fieldset class="space-y-3">
+            <legend class="mb-3 text-xs font-semibold uppercase tracking-wider text-ink-3">登录方式</legend>
+            <n-radio-group v-model:value="form.login_mode" name="loginMode">
+              <n-space :size="20">
+                <n-radio value="root_key">root + SSH 密钥</n-radio>
+                <n-radio value="root_password">root + 随机密码</n-radio>
+              </n-space>
+            </n-radio-group>
+            <div v-if="form.login_mode === 'root_key'" class="space-y-2">
+              <n-input
+                v-model:value="form.ssh_authorized_keys"
+                type="textarea"
+                class="mono"
+                placeholder="粘贴 SSH 公钥（ssh-ed25519 … 或 ssh-rsa …），或从文件导入"
+                :rows="3"
+                :input-props="{ spellcheck: 'false' }"
+              />
+              <div class="flex flex-wrap items-center gap-3">
+                <n-button secondary size="small" @click="keyFileInput?.click()">
+                  <template #icon><n-icon><CloudUploadOutline /></n-icon></template>
+                  从文件导入公钥
+                </n-button>
+                <span v-if="keyFileName" class="caption">已导入 {{ keyFileName }}</span>
+                <input ref="keyFileInput" type="file" accept=".pub,.txt,.pem,text/plain" class="sr-only" @change="onKeyFileSelected" />
+              </div>
+            </div>
+            <div v-else class="space-y-2">
+              <div class="flex flex-col gap-2 sm:flex-row">
+                <n-input v-model:value="form.root_password" class="mono flex-1" placeholder="20 位随机密码" :input-props="{ spellcheck: 'false', autocomplete: 'off' }" />
+                <div class="flex gap-2">
+                  <n-button secondary @click="generateRandomPassword">
+                    <template #icon><n-icon><RefreshOutline /></n-icon></template>
+                    重新生成
+                  </n-button>
+                  <n-button secondary @click="copyPassword">
+                    <template #icon><n-icon><CopyOutline /></n-icon></template>
+                    复制
+                  </n-button>
+                </div>
+              </div>
+              <p class="caption">创建后密码会写入实例的云端标签 <code class="mono">root_password</code>，可在「实例」页查看与修改。</p>
+            </div>
+          </fieldset>
+
+          <div class="flex flex-col gap-3 border-t border-line pt-5 sm:flex-row sm:items-center sm:justify-between">
+            <span class="caption">点击后会先显示参数确认，确认后立即向 OCI 发起创建。同一时间只允许操作一个账号。</span>
+            <n-button type="primary" size="large" attr-type="submit" :loading="launching" :disabled="!currentProfile || vcnOptions.length === 0">
+              <template #icon><n-icon><RocketOutline /></n-icon></template>
+              {{ launching ? '正在创建…' : '创建实例' }}
+            </n-button>
+          </div>
         </div>
-      </section>
-    </div>
+      </n-form>
+    </section>
 
     <!-- ===== Records ===== -->
     <section class="card mt-6 overflow-hidden">
       <div class="card-head card-pad pb-4">
         <div>
           <h2 class="section-title">创建记录</h2>
-          <p class="caption">当前账号的创建与排队记录。排队中的任务每 15 秒自动刷新。</p>
+          <p class="caption">当前账号的创建与排队记录。进行中的记录每 15 秒自动刷新。</p>
         </div>
         <n-button size="small" secondary :loading="loadingTasks" @click="fetchTasks">
           <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -243,7 +212,7 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-for="t in tasks" :key="t.id" :class="activeTask?.id === t.id ? 'bg-surface-2/70' : ''">
+            <tr v-for="t in tasks" :key="t.id">
               <td class="min-w-[200px]">
                 <div class="mono font-semibold text-ink">{{ t.instance_name }}</div>
                 <div class="mono mt-0.5 text-xs text-ink-3">{{ t.shape.includes('A1') ? 'A1' : 'E2 Micro' }} · {{ t.ocpu }}C / {{ t.memory_in_gbs }}G · {{ t.boot_volume_size_in_gbs }} GB</div>
@@ -259,7 +228,7 @@
               </td>
               <td class="text-right whitespace-nowrap">
                 <div class="inline-flex items-center gap-1.5">
-                  <n-button size="small" secondary @click="viewLogs(t)">查看日志</n-button>
+                  <n-button size="small" secondary @click="openAttempts(t)">尝试记录</n-button>
                   <n-button v-if="t.status === 'running'" size="small" secondary type="warning" :loading="taskActing === t.id" @click="stopTask(t)">停止排队</n-button>
                   <n-button v-else-if="t.status === 'stopped' || t.status === 'failed'" size="small" secondary type="success" :loading="taskActing === t.id" @click="startTask(t)">排队重试</n-button>
                   <n-button size="small" quaternary type="error" @click="deleteTask(t)">删除</n-button>
@@ -270,11 +239,41 @@
         </table>
       </div>
     </section>
+
+    <!-- Attempts -->
+    <n-modal v-model:show="showAttemptsModal" preset="card" :title="`尝试记录 · ${attemptsTask?.instance_name || ''}`" style="max-width: 760px" :bordered="false">
+      <div v-if="loadingAttempts" class="py-8 text-center text-ink-3">加载中…</div>
+      <EmptyState v-else-if="attempts.length === 0" title="还没有尝试记录" />
+      <div v-else class="tbl-wrap max-h-[60vh] overflow-y-auto">
+        <table class="tbl">
+          <thead class="sticky top-0 z-10">
+            <tr>
+              <th>时间</th>
+              <th>#</th>
+              <th>可用区</th>
+              <th>结果</th>
+              <th>消息</th>
+              <th>耗时</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="a in attempts" :key="a.id">
+              <td class="mono whitespace-nowrap text-ink-3">{{ formatTime(a.created_at) }}</td>
+              <td class="mono">{{ a.attempt_num }}</td>
+              <td class="mono text-xs text-ink-2">{{ shortAD(a.ad) }}</td>
+              <td><StatusPill :state="attemptState(a.status)" :label="attemptLabel(a.status)" /></td>
+              <td class="max-w-[320px] text-xs leading-5 text-ink-2">{{ a.response_message }}</td>
+              <td class="mono whitespace-nowrap text-xs text-ink-3">{{ a.duration_ms }} ms</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </n-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount, h } from 'vue'
 import {
   NButton,
   NIcon,
@@ -288,12 +287,14 @@ import {
   NRadioGroup,
   NRadio,
   NSpace,
+  NModal,
   useMessage,
   useDialog,
 } from 'naive-ui'
-import { GlobeOutline, RefreshOutline, CopyOutline, RocketOutline, TerminalOutline, CloudUploadOutline } from '@vicons/ionicons5'
+import { GlobeOutline, RefreshOutline, CopyOutline, RocketOutline, CloudUploadOutline, WarningOutline } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
+import { regionLabel } from '@/lib/regions'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -306,8 +307,11 @@ const launching = ref(false)
 const vcnCreating = ref(false)
 const loadingImages = ref(false)
 const loadingNets = ref(false)
+const netsLoaded = ref(false)
 const loadingADs = ref(false)
 const presets = ref<any[]>([])
+const accountType = ref<'free' | 'payg'>('free')
+const allowance = ref({ ocpu: 2, memory_gb: 12 })
 const selectedPresetId = ref<number | null>(null)
 const selectedVCN = ref<string | null>(null)
 const vcnOptions = ref<any[]>([])
@@ -320,14 +324,12 @@ const keyFileName = ref('')
 const tasks = ref<any[]>([])
 const loadingTasks = ref(false)
 const taskActing = ref('')
-const activeTask = ref<any>(null)
-
-const wsConnected = ref(false)
-const logMessages = ref<any[]>([])
-const terminalBody = ref<HTMLElement | null>(null)
-const terminalSection = ref<HTMLElement | null>(null)
-let socket: WebSocket | null = null
 let pollTimer: number | null = null
+
+const showAttemptsModal = ref(false)
+const attemptsTask = ref<any>(null)
+const attempts = ref<any[]>([])
+const loadingAttempts = ref(false)
 
 // Project-style random names: adjective-noun-NN
 const ADJECTIVES = ['amber', 'brisk', 'calm', 'coral', 'crisp', 'dusk', 'ember', 'fern', 'frost', 'gale', 'glen', 'hazel', 'ivory', 'jade', 'lunar', 'maple', 'misty', 'nova', 'ocean', 'onyx', 'opal', 'pearl', 'pine', 'quiet', 'river', 'sage', 'slate', 'solar', 'storm', 'swift', 'terra', 'tidal', 'vivid', 'willow', 'zephyr']
@@ -368,21 +370,24 @@ const vpuOptions = [
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 const isA1 = computed(() => form.value.shape.includes('A1'))
 
+const ocpuMarks = computed(() => {
+  const m: Record<number, string> = {}
+  for (let i = 1; i <= allowance.value.ocpu; i++) m[i] = String(i)
+  return m
+})
+const memMarks = computed(() => {
+  const m: Record<number, string> = {}
+  for (let i = 6; i <= allowance.value.memory_gb; i += 6) m[i] = String(i)
+  return m
+})
+
 const shortAD = (ad?: string) => (ad ? ad.replace(/^[^:]+:/, '') : '')
 const formatTime = (t: string) => (t ? new Date(t).toLocaleString('zh-CN', { hour12: false }) : '')
-const formatLogTime = (t: string) => {
-  if (!t) return ''
-  const d = new Date(t)
-  return Number.isNaN(d.getTime()) ? t : d.toLocaleTimeString('zh-CN', { hour12: false })
-}
 
 const taskState = (s: string) => ({ running: 'RUNNING_TASK', creating: 'PROVISIONING', success: 'SUCCESS', stopped: 'STOPPED', failed: 'FAILED', idle: 'IDLE' })[s] || s
-const taskLabel = (s: string) => ({ running: '排队重试中', creating: '创建中', success: '已创建', stopped: '未排队', failed: '失败', idle: '空闲' })[s] || s
-
-const logDot = (s: string) =>
-  ({ SUCCESS: 'bg-emerald-400', FATAL: 'bg-red-400', RATE_LIMIT: 'bg-amber-400', STOPPED: 'bg-side-muted', WAIT: 'bg-side-muted' })[s] || 'bg-side-3'
-const logText = (s: string) =>
-  ({ SUCCESS: 'text-emerald-300 font-semibold', FATAL: 'text-red-300 font-semibold', RATE_LIMIT: 'text-amber-200', STOPPED: 'text-side-muted', WAIT: 'text-side-muted' })[s] || 'text-side-ink'
+const taskLabel = (s: string) => ({ running: '排队重试中', creating: '正在创建…', success: '已创建', stopped: '未排队', failed: '失败', idle: '空闲' })[s] || s
+const attemptState = (s: string) => ({ success: 'SUCCESS', fatal_error: 'FAILED', rate_limited: 'PENDING', capacity_full: 'STOPPED', transient_error: 'PENDING' })[s] || s
+const attemptLabel = (s: string) => ({ success: '成功', fatal_error: '致命错误', rate_limited: '被限流', capacity_full: '容量不足', transient_error: '临时错误' })[s] || s
 
 const generateRandomPassword = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#%^*_+-='
@@ -420,6 +425,12 @@ const onKeyFileSelected = (event: Event) => {
   reader.readAsText(file)
 }
 
+const clampToAllowance = () => {
+  if (!isA1.value) return
+  if (form.value.ocpu > allowance.value.ocpu) form.value.ocpu = allowance.value.ocpu
+  if (form.value.memory_in_gbs > allowance.value.memory_gb) form.value.memory_in_gbs = allowance.value.memory_gb
+}
+
 const applyPreset = (preset: any) => {
   selectedPresetId.value = preset.id
   form.value.shape = preset.shape
@@ -440,11 +451,24 @@ const onShapeChange = () => {
     form.value.ocpu = 1
     form.value.memory_in_gbs = 1
   } else {
-    form.value.ocpu = 2
-    form.value.memory_in_gbs = 12
+    form.value.ocpu = Math.min(2, allowance.value.ocpu)
+    form.value.memory_in_gbs = Math.min(12, allowance.value.memory_gb)
   }
   form.value.image_ocid = ''
   loadImages()
+}
+
+const loadPresets = async () => {
+  try {
+    const pid = profileStore.activeProfileId ? `?profile_id=${profileStore.activeProfileId}` : ''
+    const res: any = await api.get(`/tasks/presets${pid}`)
+    presets.value = res.presets || []
+    accountType.value = res.account_type === 'payg' ? 'payg' : 'free'
+    if (res.allowance?.ocpu) allowance.value = { ocpu: res.allowance.ocpu, memory_gb: res.allowance.memory_gb }
+    clampToAllowance()
+  } catch {
+    presets.value = []
+  }
 }
 
 const loadImages = async () => {
@@ -497,6 +521,7 @@ const loadNetworks = async () => {
       subnetOptions.value = []
       form.value.subnet_ocid = ''
     }
+    netsLoaded.value = true
   } catch (e: any) {
     message.error('读取 VCN 失败：' + e.message)
   } finally {
@@ -536,61 +561,6 @@ const handleCreateDefaultVCN = async () => {
   }
 }
 
-// ---------- live log ----------
-const closeSocket = () => {
-  if (socket) {
-    socket.onclose = null
-    socket.close()
-    socket = null
-  }
-  wsConnected.value = false
-}
-
-const connectWebSocket = (taskID: string) => {
-  closeSocket()
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  socket = new WebSocket(`${protocol}//${window.location.host}/ws/logs/${taskID}`)
-  socket.onopen = () => (wsConnected.value = true)
-  socket.onmessage = (event) => {
-    try {
-      const parsed = JSON.parse(event.data)
-      logMessages.value.unshift(parsed)
-      if (logMessages.value.length > 500) logMessages.value.length = 500
-      nextTick(() => {
-        if (terminalBody.value) terminalBody.value.scrollTop = 0
-      })
-      if (['SUCCESS', 'FATAL', 'STOPPED'].includes(parsed.status)) fetchTasks()
-    } catch {
-      /* ignore malformed frames */
-    }
-  }
-  socket.onclose = () => (wsConnected.value = false)
-}
-
-const attemptToLog = (a: any) => ({
-  task_id: a.task_id,
-  attempt_num: a.attempt_num,
-  timestamp: a.created_at,
-  region: a.region,
-  ad: a.ad,
-  status: ({ success: 'SUCCESS', fatal_error: 'FATAL', rate_limited: 'RATE_LIMIT', capacity_full: 'RETRY', transient_error: 'RETRY' } as any)[a.status] || (a.status || '').toUpperCase(),
-  message: a.response_message,
-  duration_ms: a.duration_ms,
-})
-
-const viewLogs = async (task: any) => {
-  activeTask.value = task
-  logMessages.value = []
-  try {
-    const res: any = await api.get(`/tasks/attempts/${task.id}`)
-    logMessages.value = (res.attempts || []).map(attemptToLog)
-  } catch {
-    /* history is optional */
-  }
-  connectWebSocket(task.id)
-  if (window.innerWidth < 1280) terminalSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-}
-
 // ---------- records ----------
 const fetchTasks = async () => {
   if (!profileStore.activeProfileId) return
@@ -598,14 +568,25 @@ const fetchTasks = async () => {
   try {
     const res: any = await api.get(`/tasks?profile_id=${profileStore.activeProfileId}`)
     tasks.value = res.tasks || []
-    if (activeTask.value) {
-      const fresh = tasks.value.find((t) => t.id === activeTask.value.id)
-      if (fresh) activeTask.value = fresh
-    }
   } catch (e: any) {
     message.error(e.message)
   } finally {
     loadingTasks.value = false
+  }
+}
+
+const openAttempts = async (task: any) => {
+  attemptsTask.value = task
+  attempts.value = []
+  showAttemptsModal.value = true
+  loadingAttempts.value = true
+  try {
+    const res: any = await api.get(`/tasks/attempts/${task.id}`)
+    attempts.value = res.attempts || []
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    loadingAttempts.value = false
   }
 }
 
@@ -615,7 +596,6 @@ const startTask = async (t: any) => {
     const res: any = await api.post(`/tasks/start/${t.id}`)
     message.success(res.message || '已加入排队')
     await fetchTasks()
-    viewLogs(t)
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -645,11 +625,6 @@ const deleteTask = (t: any) => {
     onPositiveClick: async () => {
       try {
         await api.delete(`/tasks/delete/${t.id}`)
-        if (activeTask.value?.id === t.id) {
-          activeTask.value = null
-          closeSocket()
-          logMessages.value = []
-        }
         message.success('记录已删除')
         await fetchTasks()
       } catch (e: any) {
@@ -671,8 +646,6 @@ const askAutoRetry = (res: any) => {
         const start: any = await api.post(`/tasks/start/${res.task_id}`)
         message.success(start.message || '已加入排队')
         await fetchTasks()
-        const t = tasks.value.find((x) => x.id === res.task_id) || res.task
-        if (t) viewLogs(t)
       } catch (e: any) {
         message.error(e.message)
       }
@@ -683,9 +656,8 @@ const askAutoRetry = (res: any) => {
   })
 }
 
-const submitTask = async () => {
+const submitTask = async (submittedName: string) => {
   launching.value = true
-  const submittedName = form.value.instance_name.trim() || randomInstanceName()
   try {
     const res: any = await api.post(
       '/tasks/create',
@@ -707,15 +679,9 @@ const submitTask = async () => {
         assign_public_ip: form.value.assign_public_ip,
         enable_ipv6: form.value.enable_ipv6,
       },
-      { timeout: 160000 },
+      { timeout: 200000 },
     )
     await fetchTasks()
-    const created = res.task || tasks.value.find((t) => t.id === res.task_id)
-    if (created) {
-      activeTask.value = created
-      logMessages.value = []
-      connectWebSocket(created.id)
-    }
 
     if (res.result === 'created') {
       dialog.success({
@@ -728,17 +694,47 @@ const submitTask = async () => {
     } else if (res.retryable) {
       askAutoRetry(res)
     } else {
-      dialog.error({
-        title: '创建失败',
-        content: res.reason || '未知错误',
-        positiveText: '知道了',
-      })
+      dialog.error({ title: '创建失败', content: res.reason || '未知错误', positiveText: '知道了' })
     }
   } catch (e: any) {
     message.error(e.message)
+    fetchTasks()
   } finally {
     launching.value = false
   }
+}
+
+const confirmAndCreate = () => {
+  const name = form.value.instance_name.trim() || randomInstanceName()
+  const imageLabel = imageOptions.value.find((o) => o.value === form.value.image_ocid)?.label || form.value.image_ocid
+  const subnetLabel = subnetOptions.value.find((o) => o.value === form.value.subnet_ocid)?.label || form.value.subnet_ocid
+  const rows: [string, string][] = [
+    ['账号', `${currentProfile.value?.name || ''} · ${regionLabel(currentProfile.value?.region)}`],
+    ['实例名称', name],
+    ['规格', form.value.shape.includes('A1') ? `ARM A1 Flex · ${form.value.ocpu} OCPU / ${form.value.memory_in_gbs} GB` : 'AMD E2.1 Micro · 1 OCPU / 1 GB'],
+    ['镜像', imageLabel],
+    ['可用区', form.value.ad_list.length ? form.value.ad_list.map(shortAD).join('、') : '依次尝试全部可用区'],
+    ['引导卷', `${form.value.boot_volume_size_in_gbs} GB · ${form.value.boot_volume_vpu} VPU`],
+    ['子网', subnetLabel],
+    ['公网地址', `${form.value.assign_public_ip ? 'IPv4' : '不分配 IPv4'}${form.value.enable_ipv6 ? ' + IPv6' : ''}`],
+    ['登录方式', form.value.login_mode === 'root_key' ? `root + SSH 密钥${form.value.ssh_authorized_keys.trim() ? '' : '（未填写公钥）'}` : 'root + 随机密码（写入云端标签）'],
+  ]
+  dialog.info({
+    title: '确认创建实例',
+    style: { width: '560px', maxWidth: '95vw' },
+    content: () =>
+      h(
+        'dl',
+        { class: 'grid grid-cols-[6em_1fr] gap-x-3 gap-y-1.5 text-[13px] leading-5' },
+        rows.flatMap(([k, v]) => [
+          h('dt', { class: 'text-ink-3' }, k),
+          h('dd', { class: 'mono break-all text-ink' }, v),
+        ]),
+      ),
+    positiveText: '确认创建',
+    negativeText: '返回修改',
+    onPositiveClick: () => submitTask(name),
+  })
 }
 
 const handleCreateTask = () => {
@@ -754,23 +750,14 @@ const handleCreateTask = () => {
     dialog.warning({
       title: '没有填写 SSH 公钥',
       content: '密钥模式下不填公钥，创建出的实例将无法登录。仍要继续吗？',
-      positiveText: '继续创建',
+      positiveText: '继续',
       negativeText: '返回填写',
-      onPositiveClick: submitTask,
+      onPositiveClick: confirmAndCreate,
     })
     return
   }
   if (form.value.login_mode === 'root_password' && !form.value.root_password) generateRandomPassword()
-  submitTask()
-}
-
-const loadPresets = async () => {
-  try {
-    const res: any = await api.get('/tasks/presets')
-    presets.value = res.presets || []
-  } catch {
-    presets.value = []
-  }
+  confirmAndCreate()
 }
 
 const startPolling = () => {
@@ -784,10 +771,8 @@ const loadForProfile = async () => {
   form.value.region = currentProfile.value?.region || ''
   form.value.image_ocid = ''
   form.value.ad_list = []
-  activeTask.value = null
-  closeSocket()
-  logMessages.value = []
-  await Promise.all([loadImages(), loadNetworks(), loadADs(), fetchTasks()])
+  netsLoaded.value = false
+  await Promise.all([loadPresets(), loadImages(), loadNetworks(), loadADs(), fetchTasks()])
 }
 
 watch(
@@ -799,13 +784,11 @@ watch(
 
 onMounted(async () => {
   generateRandomPassword()
-  await loadPresets()
   await loadForProfile()
   startPolling()
 })
 
 onBeforeUnmount(() => {
-  closeSocket()
   if (pollTimer) window.clearInterval(pollTimer)
 })
 </script>

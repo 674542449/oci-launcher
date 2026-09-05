@@ -73,7 +73,7 @@ import {
 } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
-import { regionLabel } from '@/lib/regions'
+import { regionLabel, regionFlag } from '@/lib/regions'
 
 const route = useRoute()
 const router = useRouter()
@@ -95,7 +95,7 @@ const navItems = [
 ]
 
 const profileOptions = computed(() =>
-  profileStore.profiles.map((p) => ({ label: `${p.name} · ${regionLabel(p.region)}`, value: p.id })),
+  profileStore.profiles.map((p) => ({ label: `${regionFlag(p.region)} ${p.name} · ${regionLabel(p.region)}`.trim(), value: p.id })),
 )
 const activeProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 

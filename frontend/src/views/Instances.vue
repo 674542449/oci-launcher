@@ -24,9 +24,9 @@
       <EmptyState
         v-else-if="instances.length === 0"
         title="这个账号在主区域没有实例"
-        description="创建一个抢机任务，拿到容量后实例会出现在这里。"
+        description="创建实例后会显示在这里。"
       >
-        <n-button type="primary" @click="$router.push('/launcher')">去抢机</n-button>
+        <n-button type="primary" @click="$router.push('/launcher')">创建实例</n-button>
       </EmptyState>
 
       <!-- table -->

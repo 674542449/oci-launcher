@@ -75,6 +75,15 @@ func acquireLockOrReject(c *gin.Context, profileID uint) bool {
 func ListTasks(c *gin.Context) {
 	var tasks []storage.LaunchTask
 
+	// A synchronous first attempt never takes longer than firstAttemptTimeout; anything still
+	// "creating" after 10 minutes was interrupted (restart, crash) and must not look alive.
+	storage.DB.Model(&storage.LaunchTask{}).
+		Where("status = ? AND updated_at < ?", "creating", time.Now().Add(-10*time.Minute)).
+		Updates(map[string]interface{}{
+			"status":       "stopped",
+			"last_message": "创建流程被中断，未确认结果。请到「实例」页确认，需要时点「排队重试」",
+		})
+
 	query := storage.DB.Order("created_at DESC")
 	if raw := c.Query("profile_id"); raw != "" {
 		profileID, ok := parseID(raw)
@@ -349,11 +358,59 @@ func DeleteExistingTask(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "记录已删除"})
 }
 
-// ListPresets returns pre-configured free-tier presets
+// ListPresets returns quick presets for the profile's account type: the AMD micro shape first,
+// then the ARM sizes that fit the account's free allowance (2/12 for free, 4/24 for upgraded).
 func ListPresets(c *gin.Context) {
-	var presets []storage.Preset
-	storage.DB.Order("id ASC").Find(&presets)
-	c.JSON(http.StatusOK, gin.H{"presets": presets})
+	effective := "free"
+	if raw := c.Query("profile_id"); raw != "" {
+		if id, ok := parseID(raw); ok {
+			var profile storage.OCIProfile
+			if err := storage.DB.First(&profile, id).Error; err == nil {
+				effective = oci.EffectiveAccountType(&profile)
+			}
+		}
+	}
+	ocpu, mem := oci.A1Allowance(effective)
+
+	type preset struct {
+		ID                  int     `json:"id"`
+		Name                string  `json:"name"`
+		Shape               string  `json:"shape"`
+		OCPU                float64 `json:"ocpu"`
+		MemoryInGBs         float64 `json:"memory_in_gbs"`
+		BootVolumeSizeInGBs int64   `json:"boot_volume_size_in_gbs"`
+		BootVolumeVPU       int64   `json:"boot_volume_vpu"`
+		LoginMode           string  `json:"login_mode"`
+		EnableIPv6          bool    `json:"enable_ipv6"`
+		IsMax               bool    `json:"is_max"`
+	}
+
+	presets := []preset{{
+		ID: 1, Name: "AMD 微型机 1C / 1G", Shape: "VM.Standard.E2.1.Micro",
+		OCPU: 1, MemoryInGBs: 1, BootVolumeSizeInGBs: 50, BootVolumeVPU: 120, LoginMode: "root_key", EnableIPv6: true,
+	}}
+	id := 2
+	for cores := ocpu; cores >= 1; cores /= 2 {
+		memGB := mem * cores / ocpu
+		name := fmt.Sprintf("ARM %.0fC / %.0fG", cores, memGB)
+		boot := int64(50)
+		if cores == ocpu {
+			name = fmt.Sprintf("ARM 满配 %.0fC / %.0fG", cores, memGB)
+			boot = 100
+		}
+		presets = append(presets, preset{
+			ID: id, Name: name, Shape: "VM.Standard.A1.Flex",
+			OCPU: cores, MemoryInGBs: memGB, BootVolumeSizeInGBs: boot, BootVolumeVPU: 120, LoginMode: "root_key", EnableIPv6: true,
+			IsMax: cores == ocpu,
+		})
+		id++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"presets":      presets,
+		"account_type": effective,
+		"allowance":    gin.H{"ocpu": ocpu, "memory_gb": mem},
+	})
 }
 
 // ListDynamicUbuntuImages returns the newest two official Ubuntu LTS images for a shape

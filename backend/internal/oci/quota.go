@@ -49,9 +49,23 @@ type QuotaSummary struct {
 	UpdatedAt         time.Time       `json:"updated_at"`
 }
 
-// a1Allowance returns the free A1 allowance for an account type:
+// EffectiveAccountType applies the manual override to the detected type: "free" or "payg".
+func EffectiveAccountType(p *storage.OCIProfile) string {
+	switch strings.ToLower(p.AccountTypeOverride) {
+	case "payg":
+		return "payg"
+	case "free":
+		return "free"
+	}
+	if p.DetectedType == "PAYG" {
+		return "payg"
+	}
+	return "free"
+}
+
+// A1Allowance returns the free A1 allowance for an account type:
 // Always Free tenancies get 2 OCPU / 12 GB, upgraded PAYG tenancies 4 OCPU / 24 GB (configurable).
-func a1Allowance(effectiveType string) (ocpu, memGB float64) {
+func A1Allowance(effectiveType string) (ocpu, memGB float64) {
 	ocpu, memGB = 2, 12
 	if effectiveType == "payg" {
 		ocpu, memGB = 4, 24
@@ -276,7 +290,7 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 	summary.AccountType = *typeInfo
 
 	// 3. A1 allowance depends on the effective account type: free 2/12, upgraded PAYG 4/24
-	summary.TotalFreeOCPU, summary.TotalFreeMemoryGB = a1Allowance(typeInfo.EffectiveType)
+	summary.TotalFreeOCPU, summary.TotalFreeMemoryGB = A1Allowance(typeInfo.EffectiveType)
 
 	// A tenancy cap below the allowance wins; a higher cap never raises the free line.
 	if typeInfo.A1CoreLimit > 0 && float64(typeInfo.A1CoreLimit) < summary.TotalFreeOCPU {
