@@ -42,7 +42,7 @@
         <div class="card card-pad">
           <div class="text-[13px] font-semibold text-ink">{{ billing.promotions.length ? '试用额度' : '账号类型' }}</div>
           <template v-if="billing.promotions.length">
-            <div class="caption">{{ promotion.status === 'ACTIVE' ? '生效中' : promotionStatus(promotion.status) }}<span v-if="promotion.time_expired"> · {{ promotion.time_expired }} 到期</span></div>
+            <div class="caption">{{ promotionStatus(promotion.status) }}<span v-if="promotion.time_started || promotion.time_expired"> · {{ promotion.time_started || '?' }} 至 {{ promotion.time_expired || '?' }}</span><span v-if="promotion.duration"> · {{ promotion.duration }} {{ durationUnit(promotion.duration_unit) }}</span></div>
             <div class="mono mt-3 text-2xl font-semibold leading-8 text-ink">{{ money(promotion.amount) }}<span class="ml-1 text-sm font-normal text-ink-3">{{ promotion.currency || billing.currency }}</span></div>
           </template>
           <template v-else>
@@ -148,6 +148,7 @@ const share = (v: number) => {
   return `${((v / total) * 100).toFixed(1)}%`
 }
 const promotionStatus = (s: string) => ({ ACTIVE: '生效中', EXPIRED: '已过期', INITIALIZED: '未开始' } as Record<string, string>)[s] || s || '—'
+const durationUnit = (u: string) => ({ DAYS: '天', MONTHS: '个月', HOURS: '小时' } as Record<string, string>)[(u || '').toUpperCase()] || (u || '')
 
 const dailyPoints = computed(() => (billing.value?.daily || []).map((d: any) => ({ t: d.date + 'T00:00:00Z', v: d.amount })))
 const dailyTotal = computed(() => (billing.value?.daily || []).reduce((acc: number, d: any) => acc + (d.amount || 0), 0))

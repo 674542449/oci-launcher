@@ -40,6 +40,8 @@ type BillingPromotion struct {
 	Status        string  `json:"status"`
 	TimeStarted   string  `json:"time_started"`
 	TimeExpired   string  `json:"time_expired"`
+	Duration      int     `json:"duration"`      // promotion length, in DurationUnit
+	DurationUnit  string  `json:"duration_unit"` // e.g. DAYS
 	IsIntentToPay bool    `json:"is_intent_to_pay"`
 }
 
@@ -252,7 +254,11 @@ func readPromotions(ctx context.Context, profile *storage.OCIProfile, homeRegion
 				Amount:        float64(f32(p.Amount)),
 				Currency:      StrVal(p.CurrencyUnit),
 				Status:        string(p.Status),
+				DurationUnit:  StrVal(p.DurationUnit),
 				IsIntentToPay: BoolVal(p.IsIntentToPay),
+			}
+			if p.Duration != nil {
+				promo.Duration = *p.Duration
 			}
 			if p.TimeStarted != nil {
 				promo.TimeStarted = p.TimeStarted.UTC().Format("2006-01-02")
