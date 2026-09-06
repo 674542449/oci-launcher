@@ -161,6 +161,18 @@
               </n-space>
             </n-radio-group>
             <div v-if="form.login_mode === 'root_key'" class="space-y-2">
+              <div v-if="sshKeys.length" class="flex flex-wrap items-center gap-2">
+                <n-select
+                  v-model:value="selectedKeyId"
+                  :options="sshKeyOptions"
+                  placeholder="选择已保存的公钥"
+                  clearable
+                  size="small"
+                  class="w-full sm:w-[340px]"
+                  @update:value="applySavedKey"
+                />
+                <router-link to="/settings" class="txt-btn-muted">管理公钥</router-link>
+              </div>
               <n-input
                 v-model:value="form.ssh_authorized_keys"
                 type="textarea"
@@ -176,7 +188,21 @@
                 </n-button>
                 <span v-if="keyFileName" class="caption">已导入 {{ keyFileName }}</span>
                 <input ref="keyFileInput" type="file" accept=".pub,.txt,.pem,text/plain" class="sr-only" @change="onKeyFileSelected" />
+                <button v-if="form.ssh_authorized_keys.trim() && !currentKeySaved" type="button" class="txt-btn" @click="openSaveKey">保存到公钥库</button>
+                <span v-else-if="form.ssh_authorized_keys.trim() && currentKeySaved" class="caption">已在公钥库中</span>
               </div>
+              <n-modal v-model:show="showSaveKey" preset="card" title="保存到公钥库" style="max-width: 420px" :bordered="false">
+                <div class="space-y-4">
+                  <p class="caption">保存后可在「设置 → SSH 公钥」里管理，下次创建实例直接选择。</p>
+                  <n-form-item label="名称" label-placement="top" :show-feedback="false">
+                    <n-input v-model:value="saveKeyName" placeholder="例如：MacBook、工作电脑" maxlength="64" @keyup.enter="submitSaveKey" />
+                  </n-form-item>
+                  <div class="flex justify-end gap-2 pt-1">
+                    <n-button @click="showSaveKey = false">取消</n-button>
+                    <n-button type="primary" :loading="savingKey" @click="submitSaveKey">保存</n-button>
+                  </div>
+                </div>
+              </n-modal>
             </div>
             <div v-else class="space-y-2">
               <div class="flex flex-col gap-2 sm:flex-row">
@@ -218,6 +244,7 @@ import {
   NForm,
   NFormItem,
   NInput,
+  NModal,
   NInputNumber,
   NSelect,
   NSlider,
@@ -285,6 +312,70 @@ const form = ref({
   assign_public_ip: true,
   enable_ipv6: true,
 })
+
+// ---------- saved SSH public keys ----------
+const sshKeys = ref<any[]>([])
+const selectedKeyId = ref<number | null>(null)
+const sshKeyOptions = computed(() =>
+  sshKeys.value.map((k) => ({ label: `${k.name}${k.is_default ? '（默认）' : ''} · ${k.key_type}`, value: k.id })),
+)
+const currentKeySaved = computed(() => sshKeys.value.some((k) => (k.public_key || '').trim() === form.value.ssh_authorized_keys.trim()))
+
+const loadSSHKeys = async () => {
+  try {
+    const res: any = await api.get('/ssh-keys')
+    sshKeys.value = res.keys || []
+    const def = sshKeys.value.find((k) => k.is_default)
+    if (def && !form.value.ssh_authorized_keys.trim()) {
+      form.value.ssh_authorized_keys = def.public_key
+      selectedKeyId.value = def.id
+    }
+  } catch {
+    /* the key library is optional */
+  }
+}
+
+const applySavedKey = (id: number | null) => {
+  const k = sshKeys.value.find((x) => x.id === id)
+  if (!k) return
+  form.value.ssh_authorized_keys = k.public_key
+  keyFileName.value = ''
+}
+
+// Editing the textarea by hand detaches it from the selected saved key.
+watch(
+  () => form.value.ssh_authorized_keys,
+  (v) => {
+    const k = sshKeys.value.find((x) => x.id === selectedKeyId.value)
+    if (k && (k.public_key || '').trim() !== v.trim()) selectedKeyId.value = null
+  },
+)
+
+const showSaveKey = ref(false)
+const saveKeyName = ref('')
+const savingKey = ref(false)
+const openSaveKey = () => {
+  saveKeyName.value = keyFileName.value.replace(/\.pub$/i, '')
+  showSaveKey.value = true
+}
+const submitSaveKey = async () => {
+  if (!saveKeyName.value.trim()) {
+    message.warning('请给这把公钥起个名字')
+    return
+  }
+  savingKey.value = true
+  try {
+    const res: any = await api.post('/ssh-keys', { name: saveKeyName.value.trim(), public_key: form.value.ssh_authorized_keys.trim() })
+    message.success('公钥已保存')
+    showSaveKey.value = false
+    await loadSSHKeys()
+    if (res.key?.id) selectedKeyId.value = res.key.id
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    savingKey.value = false
+  }
+}
 
 const shapeOptions = [
   { label: 'ARM Ampere A1 Flex（可调核数与内存）', value: 'VM.Standard.A1.Flex' },
@@ -732,7 +823,7 @@ watch(
 
 onMounted(async () => {
   generateRandomPassword()
-  await loadForProfile()
+  await Promise.all([loadForProfile(), loadSSHKeys()])
   startPolling()
 })
 

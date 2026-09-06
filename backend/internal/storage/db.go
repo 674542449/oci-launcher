@@ -50,6 +50,7 @@ func InitDB(dsn string) (*gorm.DB, error) {
 		&Preset{},
 		&AuditLog{},
 		&SystemSetting{},
+		&SSHKey{},
 	)
 	if err != nil {
 		return nil, err

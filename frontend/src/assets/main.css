@@ -108,10 +108,14 @@
     @apply min-w-full text-[13px] text-left border-collapse;
   }
   .tbl thead th {
-    @apply px-4 py-2.5 text-xs font-medium text-ink-3 bg-surface-2 border-b border-line whitespace-nowrap;
+    @apply px-3 py-2.5 text-xs font-medium text-ink-3 bg-surface-2 border-b border-line whitespace-nowrap;
   }
   .tbl tbody td {
-    @apply px-4 py-3 border-b border-line align-top text-ink;
+    @apply px-3 py-3 border-b border-line align-middle text-ink whitespace-nowrap;
+  }
+  /* opt-in for prose cells that are allowed to wrap */
+  .tbl td.wrap {
+    white-space: normal;
   }
   .tbl tbody tr:last-child td {
     border-bottom: 0;

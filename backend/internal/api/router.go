@@ -104,6 +104,7 @@ func SetupRouter() *gin.Engine {
 			protected.POST("/instances/probe-ip", ProbeIP)
 			protected.POST("/instances/attach-ipv6", AttachIPv6)
 			protected.POST("/instances/update-tags", UpdateInstanceTags)
+			protected.GET("/instances/metrics", InstanceMetrics)
 
 			// Storage
 			protected.GET("/storage/boot-volumes", ListBootVolumes)
@@ -142,6 +143,12 @@ func SetupRouter() *gin.Engine {
 			protected.GET("/settings", GetSettings)
 			protected.POST("/settings/save", SaveSetting)
 			protected.POST("/settings/test-telegram", TestTelegram)
+
+			// Saved SSH public keys
+			protected.GET("/ssh-keys", ListSSHKeys)
+			protected.POST("/ssh-keys", CreateSSHKey)
+			protected.DELETE("/ssh-keys/:id", DeleteSSHKey)
+			protected.POST("/ssh-keys/default/:id", SetDefaultSSHKey)
 
 			// Security: bans
 			protected.GET("/security/bans", ListBans)

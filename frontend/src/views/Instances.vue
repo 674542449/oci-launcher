@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6，以及保存在云端标签里的 Root 密码。">
+    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6、7 天利用率，以及保存在云端标签里的 Root 密码。">
       <template #actions>
         <n-button secondary :loading="loading" :disabled="!currentProfile" @click="fetchInstances">
           <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -29,7 +29,7 @@
         <n-button type="primary" @click="$router.push('/launcher')">创建实例</n-button>
       </EmptyState>
 
-      <!-- table -->
+      <!-- table: one line per cell, long values truncate with the full text on hover -->
       <div v-else class="tbl-wrap">
         <table class="tbl">
           <thead>
@@ -44,38 +44,36 @@
           </thead>
           <tbody>
             <tr v-for="inst in instances" :key="inst.ocid">
-              <td class="min-w-[220px]">
-                <div class="text-[14px] font-semibold text-ink">{{ inst.display_name }}</div>
-                <div class="mono mt-0.5 text-xs text-ink-3" :title="inst.ocid">{{ maskOCID(inst.ocid) }}</div>
-                <div class="mono mt-0.5 text-xs text-ink-3">
-                  {{ shortAD(inst.ad) }} · {{ formatDate(inst.time_created) }}<span v-if="inst.compartment && inst.compartment !== 'root'"> · 区间 {{ inst.compartment }}</span>
+              <td>
+                <div class="flex max-w-[240px] flex-col">
+                  <span class="truncate text-[14px] font-semibold text-ink" :title="inst.display_name">{{ inst.display_name }}</span>
+                  <span class="mono mt-0.5 truncate text-xs text-ink-3" :title="`${inst.ocid}\n创建于 ${formatDate(inst.time_created)}`">
+                    {{ shortAD(inst.ad) }} · {{ formatShortDate(inst.time_created) }}<template v-if="inst.compartment && inst.compartment !== 'root'"> · {{ inst.compartment }}</template>
+                  </span>
                 </div>
               </td>
               <td><StatusPill :state="inst.state" /></td>
-              <td class="whitespace-nowrap">
-                <div class="mono text-[13px] text-ink">{{ inst.shape }}</div>
+              <td>
+                <div class="mono text-[13px] text-ink" :title="inst.shape">{{ shortShape(inst.shape) }}</div>
                 <div class="mono mt-0.5 text-xs text-ink-3">{{ inst.ocpu }} OCPU · {{ inst.memory_in_gbs }} GB</div>
               </td>
-              <td class="min-w-[220px]">
+              <td>
                 <div v-if="inst.public_ip" class="flex items-center gap-2">
                   <span class="mono text-[13px] font-medium text-ink">{{ inst.public_ip }}</span>
                   <button type="button" class="txt-btn" @click="copyText(inst.public_ip, '公网 IP')">复制</button>
-                  <button type="button" class="txt-btn-muted" :disabled="probing === inst.public_ip" @click="probeIP(inst.public_ip)">
-                    {{ probing === inst.public_ip ? '探测中…' : '探测 22' }}
-                  </button>
                 </div>
                 <div v-else class="text-xs text-ink-3">无公网 IPv4</div>
-                <div v-if="inst.ipv6" class="mt-1 flex items-center gap-2">
-                  <span class="mono max-w-[200px] truncate text-xs text-ink-2" :title="inst.ipv6">{{ inst.ipv6 }}</span>
+                <div v-if="inst.ipv6" class="mt-0.5 flex items-center gap-2">
+                  <span class="mono max-w-[170px] truncate text-xs text-ink-2" :title="inst.ipv6">{{ inst.ipv6 }}</span>
                   <button type="button" class="txt-btn" @click="copyText(inst.ipv6, 'IPv6')">复制</button>
                 </div>
               </td>
-              <td class="whitespace-nowrap">
+              <td>
                 <div v-if="inst.root_password" class="flex items-center gap-2">
                   <code class="mono rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{{ showPasswordMap[inst.ocid] ? inst.root_password : '••••••••••••' }}</code>
                   <button
                     type="button"
-                    class="inline-flex h-7 w-7 items-center justify-center rounded text-ink-3 hover:bg-surface-2 hover:text-ink transition-colors"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
                     :aria-label="showPasswordMap[inst.ocid] ? '隐藏密码' : '显示密码'"
                     @click="showPasswordMap[inst.ocid] = !showPasswordMap[inst.ocid]"
                   >
@@ -85,11 +83,14 @@
                 </div>
                 <div v-else class="text-xs text-ink-3">密钥登录 / 未设置</div>
               </td>
-              <td class="text-right whitespace-nowrap">
+              <td class="text-right">
                 <div class="inline-flex items-center gap-1.5">
                   <n-button v-if="inst.state === 'STOPPED'" size="small" type="success" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'START')">开机</n-button>
                   <n-button v-if="inst.state === 'RUNNING'" size="small" type="warning" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'STOP')">关机</n-button>
-                  <n-button size="small" secondary :disabled="!inst.ssh_command" @click="copyText(inst.ssh_command, 'SSH 命令')">SSH</n-button>
+                  <n-button size="small" secondary @click="openMetrics(inst)">
+                    <template #icon><n-icon><PulseOutline /></n-icon></template>
+                    利用率
+                  </n-button>
                   <n-dropdown trigger="click" :options="moreOptions(inst)" placement="bottom-end" @select="(key: string) => onMore(key, inst)">
                     <n-button size="small" secondary aria-label="更多操作">
                       <template #icon><n-icon><EllipsisHorizontal /></n-icon></template>
@@ -102,6 +103,78 @@
         </table>
       </div>
     </div>
+
+    <!-- 7-day utilization -->
+    <n-modal v-model:show="showMetricsModal" preset="card" :title="`近 7 天利用率 · ${metricsInst?.display_name || ''}`" style="width: 92vw; max-width: 780px" :bordered="false">
+      <div v-if="metricsLoading" class="space-y-4 py-2">
+        <n-skeleton text width="60%" />
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <n-skeleton v-for="i in 3" :key="i" height="168px" :sharp="false" />
+        </div>
+      </div>
+      <div v-else-if="metricsError" class="notice notice-danger">
+        <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
+        <span>{{ metricsError }}</span>
+      </div>
+      <div v-else-if="metrics" class="space-y-5">
+        <div class="flex flex-wrap items-center gap-3">
+          <span class="pill" :class="riskPill.cls">{{ riskPill.label }}</span>
+          <span class="text-[13px] leading-5 text-ink-2">{{ metrics.note }}</span>
+        </div>
+
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <!-- CPU -->
+          <div class="rounded-xl border border-line p-4">
+            <div class="flex items-baseline justify-between">
+              <span class="text-[13px] font-semibold text-ink">CPU</span>
+              <span class="caption">7 天 95 分位</span>
+            </div>
+            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.cpu.points.length ? valueTone(metrics.cpu.p95) : 'text-ink-3'">
+              {{ metrics.cpu.points.length ? fmtPct(metrics.cpu.p95) : '—' }}<span class="text-sm font-normal text-ink-3">%</span>
+            </div>
+            <Sparkline class="mt-3" :points="metrics.cpu.points" :max="100" :threshold="metrics.threshold" unit="%" aria-label="CPU 利用率，近 7 天逐小时" />
+            <div class="mono mt-2 flex justify-between text-xs text-ink-3">
+              <span>均值 {{ fmtPct(metrics.cpu.avg) }}%</span>
+              <span>峰值 {{ fmtPct(metrics.cpu.max) }}%</span>
+            </div>
+          </div>
+          <!-- Memory -->
+          <div class="rounded-xl border border-line p-4">
+            <div class="flex items-baseline justify-between">
+              <span class="text-[13px] font-semibold text-ink">内存</span>
+              <span class="caption">7 天均值</span>
+            </div>
+            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.memory.points.length ? valueTone(metrics.memory.avg) : 'text-ink-3'">
+              {{ metrics.memory.points.length ? fmtPct(metrics.memory.avg) : '—' }}<span class="text-sm font-normal text-ink-3">%</span>
+            </div>
+            <Sparkline class="mt-3" :points="metrics.memory.points" :max="100" :threshold="metrics.threshold" unit="%" aria-label="内存利用率，近 7 天逐小时" />
+            <div class="mono mt-2 flex justify-between text-xs text-ink-3">
+              <span>95 分位 {{ fmtPct(metrics.memory.p95) }}%</span>
+              <span>峰值 {{ fmtPct(metrics.memory.max) }}%</span>
+            </div>
+          </div>
+          <!-- Network -->
+          <div class="rounded-xl border border-line p-4">
+            <div class="flex items-baseline justify-between">
+              <span class="text-[13px] font-semibold text-ink">网络</span>
+              <span class="caption">7 天收发合计</span>
+            </div>
+            <div class="mono mt-1 text-2xl font-semibold leading-8 text-ink">
+              {{ fmtBytes(metrics.net_total_bytes).value }}<span class="text-sm font-normal text-ink-3">{{ fmtBytes(metrics.net_total_bytes).unit }}</span>
+            </div>
+            <Sparkline class="mt-3" :points="netSeries" unit=" MB" :decimals="1" aria-label="每小时网络流量，近 7 天" />
+            <div class="mono mt-2 flex justify-between text-xs text-ink-3">
+              <span>入 {{ fmtBytes(sum(metrics.net_in.points)).text }}</span>
+              <span>出 {{ fmtBytes(sum(metrics.net_out.points)).text }}</span>
+            </div>
+          </div>
+        </div>
+
+        <p class="caption">
+          虚线是 Oracle 的 20% 回收线：Always Free 实例若连续 7 天 CPU 95 分位、内存和网络利用率都低于它，可能被回收。数据来自实例内 Oracle Cloud Agent 的监控插件，按小时聚合，悬停查看逐小时数值。
+        </p>
+      </div>
+    </n-modal>
 
     <!-- Resize -->
     <n-modal v-model:show="showResizeModal" preset="card" title="实例改配" style="max-width: 460px" :bordered="false">
@@ -142,6 +215,39 @@
         </div>
       </div>
     </n-modal>
+
+    <!-- Terminate: the instance name has to be typed back before the button arms -->
+    <n-modal v-model:show="showTerminateModal" preset="card" title="终止并销毁实例" style="width: 92vw; max-width: 480px" :bordered="false">
+      <div v-if="selectedInst" class="space-y-4">
+        <div class="notice notice-danger">
+          <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
+          <span>实例、引导卷和其中的数据都会被删除，公网 IP 会被释放。这个操作无法恢复。</span>
+        </div>
+        <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[13px] leading-5">
+          <dt class="text-ink-3">实例</dt>
+          <dd class="mono truncate font-medium text-ink">{{ selectedInst.display_name }}</dd>
+          <dt class="text-ink-3">规格</dt>
+          <dd class="mono truncate text-ink-2">{{ selectedInst.shape }} · {{ selectedInst.ocpu }} OCPU / {{ selectedInst.memory_in_gbs }} GB</dd>
+          <dt class="text-ink-3">公网 IP</dt>
+          <dd class="mono text-ink-2">{{ selectedInst.public_ip || '无' }}</dd>
+          <dt class="text-ink-3">创建时间</dt>
+          <dd class="mono text-ink-2">{{ formatDate(selectedInst.time_created) }}</dd>
+        </dl>
+        <n-form-item :label="`输入实例名称 ${selectedInst.display_name} 以确认`" label-placement="top" :show-feedback="false">
+          <n-input
+            v-model:value="terminateConfirmName"
+            class="mono"
+            :placeholder="selectedInst.display_name"
+            :input-props="{ autocomplete: 'off', spellcheck: 'false' }"
+            @keyup.enter="submitTerminate"
+          />
+        </n-form-item>
+        <div class="flex justify-end gap-2 pt-1">
+          <n-button @click="showTerminateModal = false">取消</n-button>
+          <n-button type="error" :disabled="!terminateReady" :loading="terminating" @click="submitTerminate">终止实例</n-button>
+        </div>
+      </div>
+    </n-modal>
   </div>
 </template>
 
@@ -159,12 +265,17 @@ import {
   HardwareChipOutline,
   PricetagOutline,
   TrashOutline,
+  PulseOutline,
+  WarningOutline,
+  TerminalOutline,
+  RadioOutline,
 } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import Sparkline from '@/components/Sparkline.vue'
 
 const profileStore = useProfileStore()
 const message = useMessage()
@@ -186,6 +297,17 @@ const showEditTagsModal = ref(false)
 const editRootPass = ref('')
 const updatingTags = ref(false)
 
+const showTerminateModal = ref(false)
+const terminateConfirmName = ref('')
+const terminating = ref(false)
+const terminateReady = computed(() => !!selectedInst.value && terminateConfirmName.value.trim() === selectedInst.value.display_name)
+
+const showMetricsModal = ref(false)
+const metricsInst = ref<any>(null)
+const metrics = ref<any>(null)
+const metricsLoading = ref(false)
+const metricsError = ref('')
+
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 
 const maskOCID = (ocid?: string) => {
@@ -193,6 +315,17 @@ const maskOCID = (ocid?: string) => {
   return ocid.substring(0, 10) + '…' + ocid.substring(ocid.length - 8)
 }
 const shortAD = (ad?: string) => (ad ? ad.replace(/^[^:]+:/, '') : '')
+const shortShape = (shape?: string) => (shape ? shape.replace(/^VM\.Standard\./, '') : '')
+const formatShortDate = (t?: string) => {
+  if (!t) return ''
+  const d = new Date(t)
+  if (Number.isNaN(d.getTime())) return t
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mi = String(d.getMinutes()).padStart(2, '0')
+  return `${mm}-${dd} ${hh}:${mi}`
+}
 const isFlexShape = (shape?: string) => !!shape && shape.includes('Flex')
 const formatDate = (t?: string) => {
   if (!t) return ''
@@ -214,6 +347,8 @@ const copyText = async (txt: string, what = '内容') => {
 const icon = (c: any) => () => h(NIcon, null, { default: () => h(c) })
 
 const moreOptions = (inst: any): DropdownOption[] => [
+  { label: '复制 SSH 命令', key: 'ssh', icon: icon(TerminalOutline), disabled: !inst.ssh_command },
+  { label: probing.value === inst.public_ip ? '探测中…' : '探测 22 端口', key: 'probe', icon: icon(RadioOutline), disabled: !inst.public_ip || probing.value === inst.public_ip },
   { label: '重启（软重启）', key: 'reboot', icon: icon(RefreshOutline), disabled: inst.state !== 'RUNNING' },
   { label: '更换公网 IP', key: 'rotate', icon: icon(SwapHorizontalOutline) },
   { label: '附加 IPv6', key: 'ipv6', icon: icon(GlobeOutline), disabled: !!inst.ipv6 },
@@ -224,12 +359,14 @@ const moreOptions = (inst: any): DropdownOption[] => [
 ]
 
 const onMore = (key: string, inst: any) => {
-  if (key === 'reboot') handleAction(inst, 'SOFTRESET')
+  if (key === 'ssh') copyText(inst.ssh_command, 'SSH 命令')
+  else if (key === 'probe') probeIP(inst.public_ip)
+  else if (key === 'reboot') handleAction(inst, 'SOFTRESET')
   else if (key === 'rotate') handleRotateIP(inst)
   else if (key === 'ipv6') handleAttachIPv6(inst)
   else if (key === 'resize') openResizeModal(inst)
   else if (key === 'tags') openEditTagsModal(inst)
-  else if (key === 'terminate') confirmTerminate(inst)
+  else if (key === 'terminate') openTerminateModal(inst)
 }
 
 const fetchInstances = async () => {
@@ -264,27 +401,28 @@ const handleAction = async (inst: any, action: string) => {
 }
 
 const handleRotateIP = (inst: any) => {
+  const run = async () => {
+    const loadingMsg = message.loading('正在解绑旧 IP 并申请新 IP…', { duration: 0 })
+    try {
+      const res: any = await api.post('/instances/rotate-ip', {
+        profile_id: profileStore.activeProfileId,
+        region: currentProfile.value?.region,
+        ocid: inst.ocid,
+      })
+      message.success(`新公网 IP：${res.new_ip}`)
+      await fetchInstances()
+    } catch (e: any) {
+      message.error(e.message)
+    } finally {
+      loadingMsg.destroy()
+    }
+  }
   dialog.warning({
     title: '更换公网 IP',
     content: `将释放 ${inst.display_name} 当前的公网 IP ${inst.public_ip || ''}，并申请一个新的临时公网 IP。旧 IP 无法找回。`,
     positiveText: '更换',
     negativeText: '取消',
-    onPositiveClick: async () => {
-      const loadingMsg = message.loading('正在解绑旧 IP 并申请新 IP…', { duration: 0 })
-      try {
-        const res: any = await api.post('/instances/rotate-ip', {
-          profile_id: profileStore.activeProfileId,
-          region: currentProfile.value?.region,
-          ocid: inst.ocid,
-        })
-        message.success(`新公网 IP：${res.new_ip}`)
-        await fetchInstances()
-      } catch (e: any) {
-        message.error(e.message)
-      } finally {
-        loadingMsg.destroy()
-      }
-    },
+    onPositiveClick: run,
   })
 }
 
@@ -318,28 +456,79 @@ const handleAttachIPv6 = async (inst: any) => {
   }
 }
 
-const confirmTerminate = (inst: any) => {
-  dialog.error({
-    title: '终止并销毁实例',
-    content: `确定要终止 ${inst.display_name} 吗？实例连同引导卷和数据都会被删除，无法恢复。`,
-    positiveText: '终止实例',
-    negativeText: '取消',
-    onPositiveClick: async () => {
-      try {
-        await api.post('/instances/terminate', {
-          profile_id: profileStore.activeProfileId,
-          region: currentProfile.value?.region,
-          ocid: inst.ocid,
-        })
-        message.success('终止指令已执行')
-        setTimeout(fetchInstances, 2000)
-      } catch (e: any) {
-        message.error(e.message)
-      }
-    },
-  })
+// ---------- terminate (type the name to confirm) ----------
+const openTerminateModal = (inst: any) => {
+  selectedInst.value = inst
+  terminateConfirmName.value = ''
+  showTerminateModal.value = true
 }
 
+const submitTerminate = async () => {
+  if (!selectedInst.value || !terminateReady.value || terminating.value) return
+  terminating.value = true
+  try {
+    await api.post('/instances/terminate', {
+      profile_id: profileStore.activeProfileId,
+      region: currentProfile.value?.region,
+      ocid: selectedInst.value.ocid,
+    })
+    message.success(`已终止 ${selectedInst.value.display_name}`)
+    showTerminateModal.value = false
+    setTimeout(fetchInstances, 2000)
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    terminating.value = false
+  }
+}
+
+// ---------- 7-day utilization ----------
+const openMetrics = async (inst: any) => {
+  metricsInst.value = inst
+  metrics.value = null
+  metricsError.value = ''
+  metricsLoading.value = true
+  showMetricsModal.value = true
+  try {
+    const res: any = await api.get(`/instances/metrics?profile_id=${profileStore.activeProfileId}&ocid=${encodeURIComponent(inst.ocid)}`)
+    metrics.value = res.metrics
+  } catch (e: any) {
+    metricsError.value = e.message
+  } finally {
+    metricsLoading.value = false
+  }
+}
+
+const fmtPct = (v: number) => (Number.isFinite(v) ? v.toFixed(1) : '0.0')
+const sum = (pts: any[]) => (pts || []).reduce((acc, p) => acc + (p.v || 0), 0)
+const fmtBytes = (bytes: number) => {
+  const b = bytes || 0
+  if (b >= 1e9) return { value: (b / 1e9).toFixed(2), unit: ' GB', text: `${(b / 1e9).toFixed(2)} GB` }
+  if (b >= 1e6) return { value: (b / 1e6).toFixed(1), unit: ' MB', text: `${(b / 1e6).toFixed(1)} MB` }
+  return { value: (b / 1e3).toFixed(0), unit: ' KB', text: `${(b / 1e3).toFixed(0)} KB` }
+}
+const valueTone = (v: number) => (v < (metrics.value?.threshold ?? 20) ? 'text-danger' : 'text-ink')
+
+// hourly in + out, in MB, for the network sparkline
+const netSeries = computed(() => {
+  if (!metrics.value) return []
+  const byTime = new Map<string, number>()
+  for (const p of metrics.value.net_in?.points || []) byTime.set(p.t, (byTime.get(p.t) || 0) + p.v)
+  for (const p of metrics.value.net_out?.points || []) byTime.set(p.t, (byTime.get(p.t) || 0) + p.v)
+  return Array.from(byTime.entries())
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([t, v]) => ({ t, v: v / 1e6 }))
+})
+
+const riskPill = computed(() => {
+  const m = metrics.value
+  if (!m || m.idle_risk === 'unknown') return { cls: 'pill-muted', label: '无监控数据' }
+  if (m.idle_risk === 'high') return { cls: 'pill-danger', label: '回收风险高' }
+  if (m.idle_days > 0) return { cls: 'pill-warn', label: `已连续 ${m.idle_days} 天低于回收线` }
+  return { cls: 'pill-ok', label: '负载正常' }
+})
+
+// ---------- resize / tags ----------
 const openResizeModal = (inst: any) => {
   if (!isFlexShape(inst.shape)) {
     message.info('VM.Standard.E2.1.Micro 是固定 1 OCPU / 1 GB 的规格，无法改配')

@@ -34,15 +34,19 @@
               </thead>
               <tbody>
                 <tr v-for="bv in bootVolumes" :key="bv.ocid">
-                  <td class="min-w-[220px]">
-                    <div class="font-medium text-ink">{{ bv.display_name }}</div>
-                    <div class="mono mt-0.5 text-xs text-ink-3" :title="bv.ocid">{{ maskOCID(bv.ocid) }}</div>
+                  <td>
+                    <div class="flex max-w-[280px] flex-col">
+                      <span class="truncate font-medium text-ink" :title="bv.display_name">{{ bv.display_name }}</span>
+                      <span class="mono mt-0.5 truncate text-xs text-ink-3" :title="bv.ocid">{{ maskOCID(bv.ocid) }}</span>
+                    </div>
                   </td>
                   <td class="mono whitespace-nowrap text-[14px] font-semibold text-ink">{{ bv.size_in_gbs }} <span class="text-xs font-normal text-ink-3">GB</span></td>
                   <td><VpuBadge :vpu="bv.vpus_per_gb" /></td>
                   <td>
-                    <div class="mono text-xs text-ink-2">{{ shortAD(bv.ad) }}</div>
-                    <StatusPill class="mt-1" :state="bv.state" />
+                    <div class="flex items-center gap-2">
+                      <StatusPill :state="bv.state" />
+                      <span class="mono text-xs text-ink-2">{{ shortAD(bv.ad) }}</span>
+                    </div>
                   </td>
                   <td class="text-right whitespace-nowrap">
                     <div class="inline-flex items-center gap-1.5">
@@ -87,14 +91,18 @@
               <tbody>
                 <tr v-for="vol in blockVolumes" :key="vol.ocid">
                   <td>
-                    <div class="font-medium text-ink">{{ vol.display_name }}</div>
-                    <div class="mono mt-0.5 text-xs text-ink-3" :title="vol.ocid">{{ maskOCID(vol.ocid) }}</div>
+                    <div class="flex max-w-[280px] flex-col">
+                      <span class="truncate font-medium text-ink" :title="vol.display_name">{{ vol.display_name }}</span>
+                      <span class="mono mt-0.5 truncate text-xs text-ink-3" :title="vol.ocid">{{ maskOCID(vol.ocid) }}</span>
+                    </div>
                   </td>
                   <td class="mono whitespace-nowrap text-[14px] font-semibold text-ink">{{ vol.size_in_gbs }} <span class="text-xs font-normal text-ink-3">GB</span></td>
                   <td><VpuBadge :vpu="vol.vpus_per_gb" /></td>
                   <td>
-                    <div class="mono text-xs text-ink-2">{{ shortAD(vol.ad) }}</div>
-                    <StatusPill class="mt-1" :state="vol.state" />
+                    <div class="flex items-center gap-2">
+                      <StatusPill :state="vol.state" />
+                      <span class="mono text-xs text-ink-2">{{ shortAD(vol.ad) }}</span>
+                    </div>
                   </td>
                   <td class="mono whitespace-nowrap text-xs text-ink-3">{{ formatDate(vol.time_created) }}</td>
                 </tr>

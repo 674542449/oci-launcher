@@ -76,6 +76,77 @@
         </n-form>
       </section>
 
+      <!-- SSH public keys -->
+      <section class="card overflow-hidden">
+        <div class="card-head card-pad pb-4">
+          <div>
+            <h2 class="section-title">SSH 公钥</h2>
+            <p class="caption">保存常用公钥，创建实例时直接选择；默认公钥会自动填入。</p>
+          </div>
+          <n-button size="small" secondary @click="showAddKey = !showAddKey">
+            <template #icon><n-icon><AddOutline /></n-icon></template>
+            添加公钥
+          </n-button>
+        </div>
+        <div v-if="showAddKey" class="card-pad border-t border-line pt-4">
+          <n-form label-placement="top" :show-feedback="false" @submit.prevent="addSSHKey">
+            <div class="grid grid-cols-1 gap-4 sm:grid-cols-[220px_1fr]">
+              <n-form-item label="名称">
+                <n-input v-model:value="keyForm.name" placeholder="例如：MacBook、工作电脑" maxlength="64" />
+              </n-form-item>
+              <n-form-item label="公钥">
+                <n-input
+                  v-model:value="keyForm.public_key"
+                  type="textarea"
+                  class="mono"
+                  :rows="2"
+                  placeholder="ssh-ed25519 AAAA… 或 ssh-rsa AAAA…"
+                  :input-props="{ spellcheck: 'false' }"
+                />
+              </n-form-item>
+            </div>
+            <div class="mt-3 flex flex-wrap items-center justify-end gap-2">
+              <n-button size="small" secondary @click="settingsKeyFileInput?.click()">从文件导入</n-button>
+              <input ref="settingsKeyFileInput" type="file" accept=".pub,.txt,text/plain" class="sr-only" @change="onSettingsKeyFile" />
+              <n-button size="small" @click="showAddKey = false">取消</n-button>
+              <n-button size="small" type="primary" attr-type="submit" :loading="savingKey">保存公钥</n-button>
+            </div>
+          </n-form>
+        </div>
+        <EmptyState v-if="!loadingKeys && sshKeys.length === 0" title="还没有保存的公钥" description="添加后，创建实例时可以直接选择，不用再粘贴。" />
+        <div v-else class="tbl-wrap border-t border-line">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>名称</th>
+                <th>类型</th>
+                <th>指纹</th>
+                <th>添加时间</th>
+                <th class="text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="k in sshKeys" :key="k.id">
+                <td>
+                  <span class="font-medium text-ink">{{ k.name }}</span>
+                  <span v-if="k.is_default" class="pill pill-info ml-2">默认</span>
+                </td>
+                <td class="mono text-xs text-ink-2">{{ k.key_type }}</td>
+                <td class="mono max-w-[320px] truncate text-xs text-ink-2" :title="k.fingerprint">{{ k.fingerprint }}</td>
+                <td class="mono text-xs text-ink-3">{{ formatTime(k.created_at) }}</td>
+                <td class="text-right">
+                  <div class="inline-flex items-center gap-1.5">
+                    <n-button v-if="!k.is_default" size="small" secondary @click="setDefaultKey(k)">设为默认</n-button>
+                    <n-button size="small" secondary @click="copyKey(k)">复制</n-button>
+                    <n-button size="small" secondary type="error" :loading="deletingKey === k.id" @click="removeKey(k)">删除</n-button>
+                  </div>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- Bans -->
       <section class="card overflow-hidden">
         <div class="card-head card-pad pb-4">
@@ -161,14 +232,15 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { NForm, NFormItem, NInput, NButton, NIcon, useMessage } from 'naive-ui'
-import { SendOutline, RefreshOutline } from '@vicons/ionicons5'
+import { NForm, NFormItem, NInput, NButton, NIcon, useMessage, useDialog } from 'naive-ui'
+import { SendOutline, RefreshOutline, AddOutline } from '@vicons/ionicons5'
 import { api } from '@/api/client'
 import PageHeader from '@/components/PageHeader.vue'
 import EmptyState from '@/components/EmptyState.vue'
 
 const message = useMessage()
 const router = useRouter()
+const dialog = useDialog()
 
 const tgForm = ref({ token: '', chatId: '' })
 const savingTG = ref(false)
@@ -184,6 +256,104 @@ const bans = ref<any[]>([])
 const loadingBans = ref(false)
 const unbanning = ref('')
 const yourIP = ref('')
+
+// ---------- saved SSH public keys ----------
+const sshKeys = ref<any[]>([])
+const loadingKeys = ref(false)
+const showAddKey = ref(false)
+const keyForm = ref({ name: '', public_key: '' })
+const savingKey = ref(false)
+const deletingKey = ref(0)
+const settingsKeyFileInput = ref<HTMLInputElement | null>(null)
+
+const fetchSSHKeys = async () => {
+  loadingKeys.value = true
+  try {
+    const res: any = await api.get('/ssh-keys')
+    sshKeys.value = res.keys || []
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    loadingKeys.value = false
+  }
+}
+
+const addSSHKey = async () => {
+  if (!keyForm.value.name.trim() || !keyForm.value.public_key.trim()) {
+    message.warning('请填写名称并粘贴公钥')
+    return
+  }
+  savingKey.value = true
+  try {
+    await api.post('/ssh-keys', { name: keyForm.value.name.trim(), public_key: keyForm.value.public_key.trim() })
+    message.success('公钥已保存')
+    keyForm.value = { name: '', public_key: '' }
+    showAddKey.value = false
+    await fetchSSHKeys()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    savingKey.value = false
+  }
+}
+
+const onSettingsKeyFile = (event: Event) => {
+  const target = event.target as HTMLInputElement
+  const file = target.files?.[0]
+  if (!file) return
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    const text = String(e.target?.result || '').trim()
+    if (!/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-)/.test(text)) {
+      message.warning('这个文件看起来不是 SSH 公钥（应以 ssh-ed25519 或 ssh-rsa 开头）。请选择 .pub 文件，而不是私钥。')
+    } else {
+      keyForm.value.public_key = text
+      if (!keyForm.value.name.trim()) keyForm.value.name = file.name.replace(/\.pub$/i, '')
+    }
+    target.value = ''
+  }
+  reader.readAsText(file)
+}
+
+const removeKey = (k: any) => {
+  dialog.warning({
+    title: '删除公钥',
+    content: `删除「${k.name}」后，创建实例时将无法再选择它；已经创建的实例不受影响。`,
+    positiveText: '删除',
+    negativeText: '取消',
+    onPositiveClick: async () => {
+      deletingKey.value = k.id
+      try {
+        await api.delete(`/ssh-keys/${k.id}`)
+        message.success('公钥已删除')
+        await fetchSSHKeys()
+      } catch (e: any) {
+        message.error(e.message)
+      } finally {
+        deletingKey.value = 0
+      }
+    },
+  })
+}
+
+const setDefaultKey = async (k: any) => {
+  try {
+    await api.post(`/ssh-keys/default/${k.id}`)
+    message.success(`「${k.name}」已设为默认公钥`)
+    await fetchSSHKeys()
+  } catch (e: any) {
+    message.error(e.message)
+  }
+}
+
+const copyKey = async (k: any) => {
+  try {
+    await navigator.clipboard.writeText(k.public_key)
+    message.success('公钥已复制')
+  } catch {
+    message.error('复制失败，请手动选择复制')
+  }
+}
 
 const formatRemaining = (secs: number) => {
   if (!secs || secs < 0) return '永久'
@@ -319,6 +489,7 @@ const fetchAuditLogs = async () => {
 }
 
 onMounted(() => {
+  fetchSSHKeys()
   loadSettings()
   fetchAuditLogs()
   fetchBans()

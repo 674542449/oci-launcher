@@ -85,7 +85,7 @@
               <td><code class="mono rounded px-1.5 py-0.5 text-xs font-semibold" :class="protoClass(r.protocol)">{{ r.protocol }}</code></td>
               <td class="mono text-[13px] font-medium text-ink">{{ r.source }}</td>
               <td class="mono text-[13px] text-ink">{{ r.port_range || 'ALL' }}</td>
-              <td class="text-ink-2">{{ r.description || '—' }}</td>
+              <td class="max-w-[280px] truncate text-ink-2" :title="r.description">{{ r.description || '—' }}</td>
               <td class="text-xs text-ink-3">{{ r.is_stateless ? '无状态' : '有状态' }}</td>
               <td class="text-right whitespace-nowrap">
                 <n-button size="small" quaternary type="error" :disabled="!r.key" :loading="deletingKey === r.key" @click="confirmDeleteRule(r)">删除</n-button>

@@ -118,6 +118,17 @@ type AuditLog struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// SSHKey is a saved OpenSSH public key, picked from a list when creating instances.
+type SSHKey struct {
+	ID          uint      `gorm:"primaryKey" json:"id"`
+	Name        string    `gorm:"size:64;not null" json:"name"`
+	KeyType     string    `gorm:"size:64;not null" json:"key_type"`
+	PublicKey   string    `gorm:"type:text;not null" json:"public_key"`
+	Fingerprint string    `gorm:"size:96;uniqueIndex" json:"fingerprint"`
+	IsDefault   bool      `gorm:"default:false" json:"is_default"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
 type SystemSetting struct {
 	Key       string    `gorm:"size:64;primaryKey" json:"key"`
 	Value     string    `gorm:"type:text;not null" json:"value"`

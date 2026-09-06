@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"oci-panel/internal/oci"
@@ -66,6 +67,26 @@ func ListInstances(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"instances": instances,
 	})
+}
+
+// InstanceMetrics returns 7 days of hourly CPU / memory / network usage for one instance together
+// with Oracle's idle-reclaim verdict.
+func InstanceMetrics(c *gin.Context) {
+	profile, ok := profileFromQuery(c)
+	if !ok {
+		return
+	}
+	ocid := strings.TrimSpace(c.Query("ocid"))
+	if !strings.HasPrefix(ocid, "ocid1.instance.") {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "ocid 无效"})
+		return
+	}
+	metrics, err := oci.GetInstanceMetrics(c.Request.Context(), &profile, profile.Region, ocid)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": "读取监控数据失败: " + err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"metrics": metrics})
 }
 
 // PerformInstanceAction starts, stops, or restarts an instance
