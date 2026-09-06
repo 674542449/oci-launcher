@@ -351,6 +351,18 @@ func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *sto
 	if ctx.Err() != nil {
 		return
 	}
+	// An IPv6 address can show up a moment after the VNIC; give it a minute before deciding
+	// whether the firewall needs an IPv6 rule.
+	if task.EnableIPv6 && ipv6 == "" {
+		for i := 0; i < 6 && ipv6 == ""; i++ {
+			if !sleepCtx(ctx, 10*time.Second) {
+				return
+			}
+			if _, v6, err := oci.GetPrimaryVnicAddresses(ctx, profile, task.Region, res.InstanceOCID); err == nil {
+				ipv6 = v6
+			}
+		}
+	}
 
 	msg := "实例创建成功"
 	if res.AlreadyExisted {
@@ -361,6 +373,9 @@ func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *sto
 	} else if task.AssignPublicIP {
 		msg += "，公网 IP 尚未分配，可稍后在「实例」页刷新"
 	}
+	if task.OpenAllPorts {
+		msg += "，" + openAllPorts(ctx, profile, task.Region, res.InstanceOCID, ipv6 != "")
+	}
 
 	storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
 		"success_public_ip": pubIP,
@@ -369,6 +384,27 @@ func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *sto
 	})
 	emitLog(task.ID.String(), attemptNum, task.Region, res.AD, "SUCCESS", fmt.Sprintf("%s。实例 OCID: %s", msg, res.InstanceOCID), 0)
 	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword)
+}
+
+// openAllPorts gives a new instance its own firewall with allow-all rules: IPv4 always, IPv6
+// only when the instance actually holds an IPv6 address. A failure here never fails the task;
+// it is reported in the task message so the user can finish it from the Instances page.
+func openAllPorts(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string, hasIPv6 bool) string {
+	fw, err := oci.EnsureInstanceNSG(ctx, profile, region, instanceOCID)
+	if err != nil || fw == nil || fw.NSG == nil {
+		reason := "未知错误"
+		if err != nil {
+			reason = err.Error()
+		}
+		return "专属防火墙设置失败（" + reason + "），请在「实例」页手动启用"
+	}
+	if _, err := oci.AllowAllNSGFor(ctx, profile, region, fw.NSG.ID, hasIPv6); err != nil {
+		return "专属防火墙已启用，但放通全部端口失败（" + err.Error() + "），请在「实例」页补上"
+	}
+	if hasIPv6 {
+		return "专属防火墙已开放全部端口（IPv4 + IPv6）"
+	}
+	return "专属防火墙已开放全部端口（IPv4）"
 }
 
 // RunTaskWorker is the queued creation loop. For the ARM A1 shape it does not hammer

@@ -62,6 +62,7 @@ type LaunchTask struct {
 	RootPasswordEnc     string         `gorm:"type:text" json:"-"`
 	AssignPublicIP      bool           `gorm:"default:true" json:"assign_public_ip"`
 	EnableIPv6          bool           `gorm:"default:false" json:"enable_ipv6"`
+	OpenAllPorts        bool           `gorm:"default:false" json:"open_all_ports"` // per-instance firewall with allow-all after creation
 	CloudInitScript     string         `gorm:"type:text" json:"cloud_init_script"`
 	Status              string         `gorm:"size:32;default:'idle'" json:"status"` // idle, running, success, failed, stopped
 	RetryIntervalSecs   int            `gorm:"default:60" json:"retry_interval_secs"`

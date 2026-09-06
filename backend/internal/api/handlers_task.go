@@ -38,6 +38,7 @@ type CreateTaskRequest struct {
 	RootPassword        string   `json:"root_password" binding:"max=128"`
 	AssignPublicIP      bool     `json:"assign_public_ip"`
 	EnableIPv6          bool     `json:"enable_ipv6"`
+	OpenAllPorts        bool     `json:"open_all_ports"`
 	RetryIntervalSecs   int      `json:"retry_interval_secs" binding:"min=0,max=86400"`
 	MaxRetries          int      `json:"max_retries" binding:"min=0"`
 }
@@ -195,6 +196,7 @@ func CreateTask(c *gin.Context) {
 		RootPasswordEnc:     rootPasswordEnc,
 		AssignPublicIP:      req.AssignPublicIP,
 		EnableIPv6:          req.EnableIPv6,
+		OpenAllPorts:        req.OpenAllPorts,
 		Status:              "creating",
 		RetryIntervalSecs:   req.RetryIntervalSecs,
 		MaxRetries:          req.MaxRetries,

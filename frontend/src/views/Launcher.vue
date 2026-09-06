@@ -148,6 +148,7 @@
             <div class="flex flex-wrap gap-x-6 gap-y-2">
               <n-checkbox v-model:checked="form.assign_public_ip">分配公网 IPv4</n-checkbox>
               <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 地址</n-checkbox>
+              <n-checkbox v-model:checked="form.open_all_ports">创建后启用专属防火墙并开放全部端口（有 IPv6 地址时一并放通）</n-checkbox>
             </div>
           </fieldset>
 
@@ -311,6 +312,7 @@ const form = ref({
   root_password: '',
   assign_public_ip: true,
   enable_ipv6: true,
+  open_all_ports: true,
 })
 
 // ---------- saved SSH public keys ----------
@@ -727,6 +729,7 @@ const submitTask = async (submittedName: string) => {
         root_password: form.value.root_password,
         assign_public_ip: form.value.assign_public_ip,
         enable_ipv6: form.value.enable_ipv6,
+        open_all_ports: form.value.open_all_ports,
       },
       { timeout: 200000 },
     )
@@ -777,6 +780,7 @@ const confirmAndCreate = () => {
     ['引导卷', `${form.value.boot_volume_size_in_gbs} GB · ${form.value.boot_volume_vpu} VPU`],
     ['子网', subnetLabel],
     ['公网地址', `${form.value.assign_public_ip ? 'IPv4' : '不分配 IPv4'}${form.value.enable_ipv6 ? ' + IPv6' : ''}`],
+    ['防火墙', form.value.open_all_ports ? '专属防火墙，开放全部端口（检测到 IPv6 时一并放通）' : '不自动设置，创建后在「实例」页配置'],
     ['登录方式', form.value.login_mode === 'root_key' ? `root + SSH 密钥${form.value.ssh_authorized_keys.trim() ? '' : '（未填写公钥）'}` : 'root + 随机密码（写入云端标签）'],
   ]
   dialog.info({

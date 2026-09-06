@@ -66,13 +66,20 @@ func addNSGRules(ctx context.Context, netClient core.VirtualNetworkClient, nsgID
 
 // AllowAllNSG adds allow-all ingress rules for 0.0.0.0/0 and ::/0 to the instance's group.
 func AllowAllNSG(ctx context.Context, profile *storage.OCIProfile, region, nsgID string) (int, error) {
+	return AllowAllNSGFor(ctx, profile, region, nsgID, true)
+}
+
+// AllowAllNSGFor adds the IPv4 allow-all rule and, when the instance has IPv6, the ::/0 one.
+func AllowAllNSGFor(ctx context.Context, profile *storage.OCIProfile, region, nsgID string, includeIPv6 bool) (int, error) {
 	netClient, err := GetVirtualNetworkClient(profile, region)
 	if err != nil {
 		return 0, err
 	}
 	wanted := []core.IngressSecurityRule{
 		{Protocol: common.String("all"), Source: common.String("0.0.0.0/0"), SourceType: core.IngressSecurityRuleSourceTypeCidrBlock},
-		{Protocol: common.String("all"), Source: common.String("::/0"), SourceType: core.IngressSecurityRuleSourceTypeCidrBlock},
+	}
+	if includeIPv6 {
+		wanted = append(wanted, core.IngressSecurityRule{Protocol: common.String("all"), Source: common.String("::/0"), SourceType: core.IngressSecurityRuleSourceTypeCidrBlock})
 	}
 	return addNSGRules(ctx, netClient, nsgID, wanted)
 }
