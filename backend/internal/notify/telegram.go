@@ -90,7 +90,7 @@ func sendOrLog(kind, text string) {
 func NotifyTaskSuccess(task *storage.LaunchTask, profile *storage.OCIProfile, publicIP, ipv6, rootPass string) {
 	ipText := publicIP
 	if ipText == "" {
-		ipText = "尚未分配，请稍后在实例页刷新"
+		ipText = "尚未分配，请稍后在「实例」页刷新"
 	}
 
 	text := fmt.Sprintf(`🎉 <b>OCI 实例创建成功</b>

@@ -35,10 +35,10 @@ type sshKeyView struct {
 func parseSSHPublicKey(raw string) (keyType, fingerprint, comment string, err error) {
 	line := strings.TrimSpace(raw)
 	if strings.Contains(line, "PRIVATE KEY") {
-		return "", "", "", errors.New("这是私钥，请粘贴 .pub 公钥")
+		return "", "", "", errors.New("所提供内容为私钥，请粘贴 .pub 公钥")
 	}
 	if strings.ContainsAny(line, "\r\n") {
-		return "", "", "", errors.New("只能保存一行公钥；多把密钥请分别添加")
+		return "", "", "", errors.New("每次仅可保存一行公钥；多个密钥请分别添加")
 	}
 	fields := strings.Fields(line)
 	if len(fields) < 2 || !sshKeyTypeRe.MatchString(fields[0]) {
@@ -85,7 +85,7 @@ func ListSSHKeys(c *gin.Context) {
 func CreateSSHKey(c *gin.Context) {
 	var req sshKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写名称和公钥（名称不超过 64 个字符）"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "请填写名称与公钥（名称不超过 64 个字符）"})
 		return
 	}
 	keyType, fingerprint, _, err := parseSSHPublicKey(req.PublicKey)
@@ -97,7 +97,7 @@ func CreateSSHKey(c *gin.Context) {
 	var dup int64
 	storage.DB.Model(&storage.SSHKey{}).Where("fingerprint = ?", fingerprint).Count(&dup)
 	if dup > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "这把公钥已经保存过（指纹相同）"})
+		c.JSON(http.StatusConflict, gin.H{"error": "该公钥已存在（指纹相同）"})
 		return
 	}
 
@@ -162,7 +162,7 @@ func SetDefaultSSHKey(c *gin.Context) {
 	storage.DB.Model(&profile).Update("default_ssh_key_id", key.ID)
 	msg := "已设为「" + profile.Name + "」的默认公钥"
 	if len(names) > 0 {
-		msg += "。注意：这把公钥也是 " + strings.Join(names, "、") + " 的默认公钥，多个账号共用同一把公钥会被关联"
+		msg += "。注意：该公钥同时为 " + strings.Join(names, "、") + " 的默认公钥，多个账号共用同一公钥存在被关联的风险"
 	}
 	c.JSON(http.StatusOK, gin.H{"message": msg, "shared_with": names})
 }

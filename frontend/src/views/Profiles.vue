@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="账号" description="导入 OCI API 凭据，为每个账号打标签、写备注，并单独做健康体检。私钥加密后存储。">
+    <PageHeader title="账号" description="导入 OCI API 凭据，为账号设置标签与备注，并逐个执行健康检查。私钥加密存储。">
       <template #actions>
         <n-button secondary :loading="syncing" @click="handleSyncLocal">
           <template #icon><n-icon><FolderOpenOutline /></n-icon></template>
@@ -23,12 +23,12 @@
 
     <!-- Empty -->
     <div v-if="!profileStore.loading && profileStore.profiles.length === 0" class="card">
-      <EmptyState title="还没有导入任何账号" description="在 Oracle 控制台「添加 API 密钥」后，把生成的配置块和私钥粘贴进来即可。">
+      <EmptyState title="尚未导入账号" description="在 Oracle 控制台「添加 API 密钥」后，将生成的配置块与私钥粘贴至此。">
         <n-button type="primary" @click="showImportModal = true">导入第一个账号</n-button>
       </EmptyState>
     </div>
     <div v-else-if="searchKeyword && filteredProfiles.length === 0" class="card">
-      <EmptyState title="没有匹配的账号" description="换个关键字试试。" />
+      <EmptyState title="没有匹配的账号" description="请更换筛选关键字。" />
     </div>
 
     <!-- Cards -->
@@ -59,7 +59,7 @@
 
         <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs leading-5">
           <dt class="text-ink-3">邮箱</dt>
-          <dd class="mono truncate text-ink" :title="p.account_email">{{ p.account_email || '体检后自动获取' }}</dd>
+          <dd class="mono truncate text-ink" :title="p.account_email">{{ p.account_email || '健康检查后自动获取' }}</dd>
           <dt class="text-ink-3">注册</dt>
           <dd class="mono text-ink">{{ formatDate(p.account_created_at) }}<span v-if="countryOf(p)" class="text-ink-3"> · {{ countryOf(p) }}</span></dd>
           <dt v-if="p.tenancy_name" class="text-ink-3">租户</dt>
@@ -82,7 +82,7 @@
           <n-button v-if="p.id !== profileStore.activeProfileId" size="small" type="primary" secondary @click="profileStore.setActiveProfile(p.id)">设为当前账号</n-button>
           <span v-else class="text-xs font-medium text-ink-3">正在操作此账号</span>
           <div class="flex items-center gap-1">
-            <n-button size="small" quaternary :loading="checkingHealthId === p.id" @click="checkHealth(p)">体检</n-button>
+            <n-button size="small" quaternary :loading="checkingHealthId === p.id" @click="checkHealth(p)">健康检查</n-button>
             <n-button size="small" quaternary @click="openEditProfileModal(p)">编辑</n-button>
             <n-button size="small" quaternary type="error" @click="deleteProfile(p)">删除</n-button>
           </div>
@@ -95,7 +95,7 @@
       <div class="space-y-5">
         <div class="notice notice-info">
           <n-icon size="18" class="mt-0.5 shrink-0"><InformationCircleOutline /></n-icon>
-          <span>在 Oracle 控制台 → 用户 → API 密钥 → 添加 API 密钥，把生成的「配置文件预览」整段粘贴到下面，系统会自动解析 user、tenancy、fingerprint 和 region。</span>
+          <span>在 Oracle 控制台 → 用户 → API 密钥 → 添加 API 密钥，将生成的「配置文件预览」完整粘贴至下方，系统将自动解析 user、tenancy、fingerprint 与 region。</span>
         </div>
 
         <div>
@@ -218,7 +218,7 @@ const filteredProfiles = computed(() => {
   )
 })
 
-const statusLabel = (s: string) => (s === 'Active' ? '正常' : s === 'Banned' ? '疑似封号' : s === 'Invalid' ? '凭据无效' : s || '未知')
+const statusLabel = (s: string) => (s === 'Active' ? '正常' : s === 'Banned' ? '疑似封禁' : s === 'Invalid' ? '凭据无效' : s || '未知')
 
 // Account type as reported by the Organizations subscription API (or the manual override)
 const accountTypeLabel = (p: OCIProfile) => {
@@ -326,7 +326,7 @@ const submitEditProfile = async () => {
 const deleteProfile = (profile: OCIProfile) => {
   dialog.error({
     title: '删除账号',
-    content: `确定删除账号 ${profile.name} 吗？本地保存的凭据会被清除，云上的资源不受影响。`,
+    content: `确定删除账号 ${profile.name} ？本地保存的凭据将被清除，云端资源不受影响。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {

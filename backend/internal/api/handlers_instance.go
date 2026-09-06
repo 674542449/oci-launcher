@@ -110,7 +110,7 @@ func PerformInstanceAction(c *gin.Context) {
 
 	storage.LogAudit("INSTANCE_ACTION", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Action %s on %s", req.Action, req.OCID), "SUCCESS")
 
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("操作 [%s] 指令已成功下发至云端", req.Action)})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("操作指令 %s 已提交", req.Action)})
 }
 
 type TerminateInstanceRequest struct {
@@ -143,7 +143,7 @@ func TerminateInstance(c *gin.Context) {
 
 	storage.LogAudit("INSTANCE_TERMINATE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), fmt.Sprintf("Terminated %s", req.OCID), "SUCCESS")
 
-	c.JSON(http.StatusOK, gin.H{"message": "实例终止（销毁）指令已成功执行"})
+	c.JSON(http.StatusOK, gin.H{"message": "实例终止指令已提交"})
 }
 
 // ResizeInstance modifies CPU and memory of an instance
@@ -162,11 +162,11 @@ func ResizeInstance(c *gin.Context) {
 
 	err := oci.ResizeInstance(c.Request.Context(), &profile, req.Region, req.OCID, req.NewOCPU, req.NewMemory)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "改配失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "规格调整失败: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "改配指令已成功执行"})
+	c.JSON(http.StatusOK, gin.H{"message": "规格调整指令已提交"})
 }
 
 // RotatePublicIP generates and binds a new ephemeral public IP
@@ -190,7 +190,7 @@ func RotatePublicIP(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "公网 IP 已成功更换！",
+		"message": "公网 IP 已更换",
 		"new_ip":  newIP,
 	})
 }
@@ -239,7 +239,7 @@ func AttachIPv6(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "IPv6 已成功分配并绑定！",
+		"message": "IPv6 地址已分配并绑定",
 		"ipv6":    ipv6,
 	})
 }
@@ -264,5 +264,5 @@ func UpdateInstanceTags(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "实例云端标签已成功更新！"})
+	c.JSON(http.StatusOK, gin.H{"message": "实例云端标签已更新"})
 }

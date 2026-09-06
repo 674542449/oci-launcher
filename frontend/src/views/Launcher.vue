@@ -1,12 +1,12 @@
 <template>
   <div>
-    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队：ARM A1 每 3–5 分钟查询一次官方容量报告，有容量才真正创建；AMD 微型机按同样间隔直接尝试。最长持续 7 天。" />
+    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可加入排队：ARM A1 每 3–5 分钟查询一次官方容量报告，报告有容量时才发起创建；AMD Micro 按相同间隔直接尝试。排队最长持续 7 天。" />
 
     <!-- No VCN yet -->
     <div v-if="!loadingNets && netsLoaded && vcnOptions.length === 0" class="notice notice-warn mb-6 items-center">
       <n-icon size="18" class="shrink-0"><WarningOutline /></n-icon>
       <div class="flex flex-1 flex-wrap items-center justify-between gap-3">
-        <span>这个账号在当前区域还没有虚拟云网络（VCN），创建实例前需要先建一个。推荐网络包含公共子网、互联网网关、IPv6 和常用端口放行。</span>
+        <span>该账号在当前区域尚无虚拟云网络（VCN），创建实例前需先创建。推荐网络包含公共子网、互联网网关与 IPv6。</span>
         <n-button type="primary" size="small" :loading="vcnCreating" @click="handleCreateDefaultVCN">
           <template #icon><n-icon><GlobeOutline /></n-icon></template>
           一键创建推荐 VCN
@@ -74,7 +74,7 @@
               <n-form-item label="实例名称">
                 <n-input v-model:value="form.instance_name" placeholder="留空则自动生成" :input-props="{ spellcheck: 'false' }" class="mono">
                   <template #suffix>
-                    <button type="button" class="txt-btn-muted" title="重新生成名称" @click="form.instance_name = randomInstanceName()">换一个</button>
+                    <button type="button" class="txt-btn-muted" title="重新生成名称" @click="form.instance_name = randomInstanceName()">重新生成</button>
                   </template>
                 </n-input>
               </n-form-item>
@@ -82,7 +82,7 @@
                 <n-select v-model:value="form.shape" :options="shapeOptions" @update:value="onShapeChange" />
               </n-form-item>
             </div>
-            <p class="caption -mt-2">名称随机生成，同名实例已存在时不会重复创建。</p>
+            <p class="caption -mt-2">名称按控制台默认样式生成；同名实例已存在时不会重复创建。</p>
 
             <div v-if="isA1" class="grid grid-cols-1 gap-5 rounded-lg border border-line bg-surface-2 p-4 sm:grid-cols-2">
               <div>
@@ -117,7 +117,7 @@
                 <n-select v-model:value="form.ad_list" multiple :options="adOptions" :loading="loadingADs" placeholder="留空则依次尝试全部可用区" max-tag-count="responsive" />
               </n-form-item>
             </div>
-            <p class="caption -mt-2">镜像按 Shape 架构自动筛选：A1 用 aarch64，E2 Micro 用 x86_64。</p>
+            <p class="caption -mt-2">镜像按 Shape 架构自动筛选：A1 使用 aarch64，E2.1.Micro 使用 x86_64。</p>
           </fieldset>
 
           <!-- 引导卷 -->
@@ -131,7 +131,7 @@
                 <n-select v-model:value="form.boot_volume_vpu" :options="vpuOptions" />
               </n-form-item>
             </div>
-            <p class="caption -mt-2">引导卷与块存储合计免费 200 GB。高于 10 VPU 的档位在已升级账号上会按 VPU 计费。</p>
+            <p class="caption -mt-2">引导卷与块存储合计免费 200 GB；高于 10 VPU 的档位在升级号上按 VPU 计费。</p>
           </fieldset>
 
           <!-- 网络 -->
@@ -148,7 +148,7 @@
             <div class="flex flex-wrap gap-x-6 gap-y-2">
               <n-checkbox v-model:checked="form.assign_public_ip">分配公网 IPv4</n-checkbox>
               <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 地址</n-checkbox>
-              <n-checkbox v-model:checked="form.open_all_ports">创建后启用专属防火墙并开放全部端口（有 IPv6 地址时一并放通）</n-checkbox>
+              <n-checkbox v-model:checked="form.open_all_ports">创建后启用专属防火墙并放通全部端口（检测到 IPv6 地址时一并放通）</n-checkbox>
             </div>
           </fieldset>
 
@@ -196,7 +196,7 @@
               </div>
               <n-modal v-model:show="showSaveKey" preset="card" title="保存到公钥库" style="max-width: 420px" :bordered="false">
                 <div class="space-y-4">
-                  <p class="caption">保存后可在「设置 → SSH 公钥」里管理，下次创建实例直接选择。</p>
+                  <p class="caption">保存后可在「设置 → SSH 公钥」中管理，创建实例时可直接选择。</p>
                   <n-form-item label="名称" label-placement="top" :show-feedback="false">
                     <n-input v-model:value="saveKeyName" placeholder="例如：MacBook、工作电脑" maxlength="64" @keyup.enter="submitSaveKey" />
                   </n-form-item>
@@ -226,7 +226,7 @@
           </fieldset>
 
           <div class="flex flex-col gap-3 border-t border-line pt-5 sm:flex-row sm:items-center sm:justify-between">
-            <span class="caption">点击后会先显示参数确认，确认后立即向 OCI 发起创建。同一时间只允许操作一个账号。</span>
+            <span class="caption">点击后先显示参数确认，确认后立即向 OCI 发起创建。同一时间仅允许操作一个账号。</span>
             <n-button type="primary" size="large" attr-type="submit" :loading="launching" :disabled="!currentProfile || vcnOptions.length === 0">
               <template #icon><n-icon><RocketOutline /></n-icon></template>
               {{ launching ? '正在创建…' : '创建实例' }}
@@ -350,7 +350,7 @@ const applySavedKey = (id: number | null) => {
   form.value.ssh_authorized_keys = k.public_key
   keyFileName.value = ''
   const others = (k.default_for || []).filter((n: string) => n !== currentProfile.value?.name)
-  if (others.length) message.warning(`这把公钥也是 ${others.join('、')} 的默认公钥，多个账号共用同一把公钥会被关联`)
+  if (others.length) message.warning(`该公钥同时为 ${others.join('、')} 的默认公钥；多个账号共用同一公钥存在被关联的风险`)
 }
 
 const setAccountDefaultKey = async () => {
@@ -383,7 +383,7 @@ const openSaveKey = () => {
 }
 const submitSaveKey = async () => {
   if (!saveKeyName.value.trim()) {
-    message.warning('请给这把公钥起个名字')
+    message.warning('请填写公钥名称')
     return
   }
   savingKey.value = true
@@ -429,14 +429,14 @@ const announceOutcome = (t: any) => {
     dialog.success({
       title: '实例创建成功',
       content: `${t.instance_name}：${t.last_message || '已在 OCI 创建成功'}`,
-      positiveText: '知道了',
+      positiveText: '确定',
     })
   } else if (t.status === 'failed') {
-    dialog.error({ title: '创建失败', content: t.last_message || '未知错误', positiveText: '知道了' })
+    dialog.error({ title: '创建失败', content: t.last_message || '未知错误', positiveText: '确定' })
   } else if (t.status === 'stopped' && watchedPrevStatus.value !== 'running') {
-    askAutoRetry({ task_id: t.id, reason: t.last_message || '实例开通失败', attempts: t.current_retries || 1 })
+    askAutoRetry({ task_id: t.id, reason: t.last_message || '实例创建失败', attempts: t.current_retries || 1 })
   } else if (t.status === 'stopped') {
-    dialog.info({ title: '排队已结束', content: `${t.instance_name}：${t.last_message || '已停止'}`, positiveText: '知道了' })
+    dialog.info({ title: '排队已结束', content: `${t.instance_name}：${t.last_message || '已停止'}`, positiveText: '确定' })
   } else {
     return
   }
@@ -501,7 +501,7 @@ const onKeyFileSelected = (event: Event) => {
   reader.onload = (e) => {
     const text = String(e.target?.result || '').trim()
     if (!/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-)/.test(text)) {
-      message.warning('这个文件看起来不是 SSH 公钥（应以 ssh-ed25519 或 ssh-rsa 开头）。请选择 .pub 文件，而不是私钥。')
+      message.warning('所选文件不是有效的 SSH 公钥（应以 ssh-ed25519 或 ssh-rsa 开头）。请选择 .pub 公钥文件，而非私钥。')
       target.value = ''
       return
     }
@@ -685,7 +685,7 @@ const stopTask = async (t: any) => {
 const askAutoRetry = (res: any) => {
   dialog.warning({
     title: '创建失败，是否自动重试？',
-    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后，ARM A1 每 3–5 分钟查询一次官方容量报告，有容量才真正创建；AMD 微型机按同样间隔直接尝试。直到成功、达到 7 天上限或你手动停止。`,
+    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后，ARM A1 每 3–5 分钟查询一次官方容量报告，报告有容量时才发起创建；AMD Micro 按相同间隔直接尝试。直至创建成功、达到 7 天上限或手动停止。`,
     positiveText: '自动重试',
     negativeText: '不重试',
     onPositiveClick: async () => {
@@ -698,7 +698,7 @@ const askAutoRetry = (res: any) => {
       }
     },
     onNegativeClick: () => {
-      message.info('已放弃，可重新点击「创建实例」再试')
+      message.info('已取消排队，可重新点击「创建实例」')
     },
   })
 }
@@ -743,23 +743,23 @@ const submitTask = async (submittedName: string) => {
     if (res.result === 'created') {
       dialog.success({
         title: res.existed ? '实例已存在' : '实例创建成功',
-        content: `${submittedName} 已在 OCI 创建成功${res.existed ? '（云端已有同名实例）' : '，已返回实例 OCID'}。公网 IP 分配后会显示在「实例」页。`,
-        positiveText: '知道了',
+        content: `${submittedName} 已在 OCI 创建成功${res.existed ? '（云端已有同名实例）' : '，已返回实例 OCID'}。公网 IP 分配后将在「实例」页显示。`,
+        positiveText: '确定',
       })
       form.value.instance_name = randomInstanceName()
       if (form.value.login_mode === 'root_password') generateRandomPassword()
     } else if (res.retryable) {
       askAutoRetry(res)
     } else {
-      dialog.error({ title: '创建失败', content: res.reason || '未知错误', positiveText: '知道了' })
+      dialog.error({ title: '创建失败', content: res.reason || '未知错误', positiveText: '确定' })
     }
   } catch (e: any) {
     // No answer (timeout, proxy limit): the backend keeps going and writes the result to the
     // record; polling picks it up and announces it here.
     dialog.warning({
       title: '暂未收到创建结果',
-      content: `与服务器的连接超时（${e.message}）。创建可能仍在后台进行，本页会持续刷新并提示结果，也可到「实例」页查看。`,
-      positiveText: '知道了',
+      content: `与服务器的连接超时（${e.message}）。创建可能仍在后台进行，本页将持续刷新并提示结果，也可在「实例」页查看。`,
+      positiveText: '确定',
     })
     fetchTasks()
   } finally {
@@ -780,7 +780,7 @@ const confirmAndCreate = () => {
     ['引导卷', `${form.value.boot_volume_size_in_gbs} GB · ${form.value.boot_volume_vpu} VPU`],
     ['子网', subnetLabel],
     ['公网地址', `${form.value.assign_public_ip ? 'IPv4' : '不分配 IPv4'}${form.value.enable_ipv6 ? ' + IPv6' : ''}`],
-    ['防火墙', form.value.open_all_ports ? '专属防火墙，开放全部端口（检测到 IPv6 时一并放通）' : '不自动设置，创建后在「实例」页配置'],
+    ['防火墙', form.value.open_all_ports ? '专属防火墙，开放全部端口（检测到 IPv6 时一并放通）' : '不自动配置，创建后在「实例」页设置'],
     ['登录方式', form.value.login_mode === 'root_key' ? `root + SSH 密钥${form.value.ssh_authorized_keys.trim() ? '' : '（未填写公钥）'}` : 'root + 随机密码（写入云端标签）'],
   ]
   dialog.info({
@@ -812,8 +812,8 @@ const handleCreateTask = () => {
   }
   if (form.value.login_mode === 'root_key' && !form.value.ssh_authorized_keys.trim()) {
     dialog.warning({
-      title: '没有填写 SSH 公钥',
-      content: '密钥模式下不填公钥，创建出的实例将无法登录。仍要继续吗？',
+      title: '未填写 SSH 公钥',
+      content: '密钥登录模式下未填写公钥，创建的实例将无法登录。是否继续？',
       positiveText: '继续',
       negativeText: '返回填写',
       onPositiveClick: confirmAndCreate,

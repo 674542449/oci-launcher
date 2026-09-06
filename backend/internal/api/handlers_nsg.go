@@ -163,7 +163,7 @@ func DisableInstanceFirewall(c *gin.Context) {
 	storage.LogAudit("INSTANCE_FIREWALL_DISABLE", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), req.NSGID+" from "+req.OCID, "SUCCESS")
 	msg := "专属防火墙已移除"
 	if !deleted {
-		msg = "已从该实例解绑；安全组仍被其他网卡使用，未删除"
+		msg = "已解除与该实例的关联；该安全组仍被其他网卡使用，未删除"
 	}
 	c.JSON(http.StatusOK, gin.H{"message": msg, "deleted": deleted})
 }

@@ -126,7 +126,7 @@ func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region
 	}
 
 	if len(result.CPU.Points) == 0 {
-		result.Note = "没有监控数据：实例内的 Oracle Cloud Agent 监控插件未启用，或实例刚创建不久"
+		result.Note = "暂无监控数据：实例内 Oracle Cloud Agent 监控插件未启用，或实例创建时间过短"
 		return result, nil
 	}
 	result.DataAvailable = true

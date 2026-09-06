@@ -489,28 +489,28 @@ func ValidateFreeTierConstraint(ctx context.Context, profile *storage.OCIProfile
 
 	// 1. Always Free resources only exist in the home region
 	if summary.HomeRegion != "" && !strings.EqualFold(strings.TrimSpace(task.Region), summary.HomeRegion) {
-		return fmt.Errorf("【零费用硬阻断】目标区域 [%s] 与该账号的主区域 [%s] 不一致。免费资源只能在主区域创建，跨区创建会产生扣费", task.Region, summary.HomeRegion)
+		return fmt.Errorf("【零费用保护】目标区域 [%s] 与该账号主区域 [%s] 不一致。免费资源仅可在主区域创建，跨区域创建将产生费用", task.Region, summary.HomeRegion)
 	}
 
 	// 2. Boot + block storage total
 	if summary.UsedStorageGB+task.BootVolumeSizeInGBs > summary.TotalStorageGB {
-		return fmt.Errorf("【存储超额硬阻断】申请引导卷 %d GB + 当前已用 %d GB = %d GB，超过 %d GB 免费存储总额，请调小引导卷",
+		return fmt.Errorf("【存储额度保护】申请引导卷 %d GB + 已用 %d GB = %d GB，超出 %d GB 免费存储总额，请减小引导卷容量",
 			task.BootVolumeSizeInGBs, summary.UsedStorageGB, summary.UsedStorageGB+task.BootVolumeSizeInGBs, summary.TotalStorageGB)
 	}
 
 	// 3. Compute
 	if strings.Contains(task.Shape, "A1.Flex") {
 		if summary.UsedA1OCPU+task.OCPU > summary.TotalFreeOCPU {
-			return fmt.Errorf("【CPU额度硬阻断】申请 %0.1f OCPU + 当前已用 %0.1f OCPU = %0.1f OCPU，超出免费额度 %0.1f OCPU",
+			return fmt.Errorf("【CPU 额度保护】申请 %0.1f OCPU + 当前已用 %0.1f OCPU = %0.1f OCPU，超出免费额度 %0.1f OCPU",
 				task.OCPU, summary.UsedA1OCPU, summary.UsedA1OCPU+task.OCPU, summary.TotalFreeOCPU)
 		}
 		if summary.UsedA1MemoryGB+task.MemoryInGBs > summary.TotalFreeMemoryGB {
-			return fmt.Errorf("【内存额度硬阻断】申请 %0.1f GB + 当前已用 %0.1f GB = %0.1f GB，超出免费额度 %0.1f GB",
+			return fmt.Errorf("【内存额度保护】申请 %0.1f GB + 当前已用 %0.1f GB = %0.1f GB，超出免费额度 %0.1f GB",
 				task.MemoryInGBs, summary.UsedA1MemoryGB, summary.UsedA1MemoryGB+task.MemoryInGBs, summary.TotalFreeMemoryGB)
 		}
 	} else if strings.Contains(task.Shape, "E2.1.Micro") {
 		if summary.MicroCount >= summary.MaxMicroCount {
-			return fmt.Errorf("【AMD数量硬阻断】当前已有 %d 台 VM.Standard.E2.1.Micro 实例，已达到 %d 台免费上限", summary.MicroCount, summary.MaxMicroCount)
+			return fmt.Errorf("【AMD 数量保护】当前已有 %d 台 VM.Standard.E2.1.Micro 实例，已达 %d 台免费上限", summary.MicroCount, summary.MaxMicroCount)
 		}
 	}
 

@@ -42,7 +42,7 @@ func StartTask(taskID uuid.UUID) error {
 		Where("id = ?", taskID).
 		Updates(map[string]interface{}{
 			"status":       "running",
-			"last_message": "已加入排队，等待下一次尝试…",
+			"last_message": "已加入排队，等待下一次检查…",
 		}).Error
 	if err != nil {
 		return err
@@ -90,7 +90,7 @@ func StopTask(taskID uuid.UUID) {
 		Where("id = ? AND status = ?", taskID, "creating").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
-			"last_message": "用户手动清除，请到「实例」页确认结果",
+			"last_message": "已手动清除，请在「实例」页确认结果",
 		}).Error
 }
 
@@ -101,7 +101,7 @@ func ResumeAllRunningTasks() {
 		Where("status = ?", "creating").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
-			"last_message": "服务重启时创建被中断，可点击「重试」重新排队",
+			"last_message": "服务重启导致创建中断，可点击「重试」重新排队",
 		}).Error
 
 	var tasks []storage.LaunchTask
@@ -128,6 +128,6 @@ func PanicLockdown() {
 		Where("status = ?", "running").
 		Updates(map[string]interface{}{
 			"status":       "stopped",
-			"last_message": "【全站紧急锁定】所有任务已被安全停机",
+			"last_message": "【全站紧急锁定】所有任务已停止",
 		}).Error
 }

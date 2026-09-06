@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6、7 天利用率、按实例的防火墙，以及保存在云端标签里的 Root 密码。">
+    <PageHeader title="实例" description="启停、更换公网 IP、规格调整、附加 IPv6、7 天利用率、实例专属防火墙，以及云端标签中保存的 Root 密码。">
       <template #actions>
         <n-button secondary :loading="loading" :disabled="!currentProfile" @click="fetchInstances">
           <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -23,8 +23,8 @@
       <!-- empty -->
       <EmptyState
         v-else-if="instances.length === 0"
-        title="这个账号在主区域没有实例"
-        description="创建实例后会显示在这里。"
+        title="该账号在主区域暂无实例"
+        description="创建的实例将在此显示。"
       >
         <n-button type="primary" @click="$router.push('/launcher')">创建实例</n-button>
       </EmptyState>
@@ -93,8 +93,8 @@
               </td>
               <td class="text-right">
                 <div class="inline-flex items-center gap-1">
-                  <n-button v-if="inst.state === 'STOPPED'" size="small" type="success" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'START')">开机</n-button>
-                  <n-button v-if="inst.state === 'RUNNING'" size="small" type="warning" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'STOP')">关机</n-button>
+                  <n-button v-if="inst.state === 'STOPPED'" size="small" type="success" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'START')">启动</n-button>
+                  <n-button v-if="inst.state === 'RUNNING'" size="small" type="warning" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'STOP')">停止</n-button>
                   <n-button size="small" secondary @click="openMetrics(inst)">
                     <template #icon><n-icon><PulseOutline /></n-icon></template>
                     利用率
@@ -187,14 +187,14 @@
           </div>
         </div>
 
-        <p class="caption">数据来自实例内 Oracle Cloud Agent 的监控插件，按小时聚合，悬停查看逐小时数值。</p>
+        <p class="caption">数据来自实例内 Oracle Cloud Agent 监控插件，按小时聚合；悬停可查看逐小时数值。</p>
       </div>
     </n-modal>
 
     <!-- Resize -->
-    <n-modal v-model:show="showResizeModal" preset="card" title="实例改配" style="max-width: 460px" :bordered="false">
+    <n-modal v-model:show="showResizeModal" preset="card" title="实例规格调整" style="max-width: 460px" :bordered="false">
       <div v-if="selectedInst" class="space-y-5">
-        <p class="caption">对 <b class="text-ink">{{ selectedInst.display_name }}</b> 调整 OCPU 与内存。运行中的实例会先停机，改配完成后再启动。</p>
+        <p class="caption">对 <b class="text-ink">{{ selectedInst.display_name }}</b> 调整 OCPU 与内存。运行中的实例将先停止，规格调整完成后重新启动。</p>
         <div>
           <div class="mb-1.5 flex items-center justify-between">
             <span class="label mb-0">OCPU</span>
@@ -212,7 +212,7 @@
         <p v-if="resizeMemory !== resizeOCPU * 6" class="caption">免费额度下每 OCPU 建议搭配 6 GB 内存（{{ resizeOCPU }} 核对应 {{ resizeOCPU * 6 }} GB）。</p>
         <div class="flex justify-end gap-2 pt-1">
           <n-button @click="showResizeModal = false">取消</n-button>
-          <n-button type="primary" :loading="resizing" @click="submitResize">确认改配</n-button>
+          <n-button type="primary" :loading="resizing" @click="submitResize">确认调整</n-button>
         </div>
       </div>
     </n-modal>
@@ -220,7 +220,7 @@
     <!-- Tags -->
     <n-modal v-model:show="showEditTagsModal" preset="card" title="编辑 Root 密码标签" style="max-width: 460px" :bordered="false">
       <div v-if="selectedInst" class="space-y-4">
-        <p class="caption">写入实例的云端自由标签 <code class="mono">password</code>。留空则删除该标签。这不会修改系统里的真实密码。</p>
+        <p class="caption">写入实例的云端自由标签 <code class="mono">password</code>；留空则删除该标签。此操作不会修改操作系统中的实际密码。</p>
         <n-form-item label="password" label-placement="top" :show-feedback="false">
           <n-input v-model:value="editRootPass" class="mono" placeholder="留空则删除" :input-props="{ autocomplete: 'off', spellcheck: 'false' }" />
         </n-form-item>
@@ -236,7 +236,7 @@
       <div v-if="selectedInst" class="space-y-4">
         <div class="notice notice-danger">
           <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
-          <span>实例、引导卷和其中的数据都会被删除，公网 IP 会被释放。这个操作无法恢复。</span>
+          <span>实例、引导卷及其数据将被删除，公网 IP 将被释放。此操作不可恢复。</span>
         </div>
         <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[13px] leading-5">
           <dt class="text-ink-3">实例</dt>
@@ -365,7 +365,7 @@ const copyText = async (txt: string, what = '内容') => {
     await navigator.clipboard.writeText(txt)
     message.success(`${what}已复制`)
   } catch {
-    message.error('复制失败，请手动选择复制')
+    message.error('复制失败，请手动复制')
   }
 }
 
@@ -377,7 +377,7 @@ const moreOptions = (inst: any): DropdownOption[] => [
   { label: '重启（软重启）', key: 'reboot', icon: icon(RefreshOutline), disabled: inst.state !== 'RUNNING' },
   { label: '更换公网 IP', key: 'rotate', icon: icon(SwapHorizontalOutline) },
   { label: '附加 IPv6', key: 'ipv6', icon: icon(GlobeOutline), disabled: !!inst.ipv6 },
-  { label: '改配 OCPU / 内存', key: 'resize', icon: icon(HardwareChipOutline), disabled: !isFlexShape(inst.shape) },
+  { label: '调整 OCPU / 内存', key: 'resize', icon: icon(HardwareChipOutline), disabled: !isFlexShape(inst.shape) },
   { label: '编辑 Root 密码标签', key: 'tags', icon: icon(PricetagOutline) },
   { type: 'divider', key: 'd1' },
   { label: '终止实例', key: 'terminate', icon: icon(TrashOutline), props: { style: 'color: var(--c-danger)' } },
@@ -416,7 +416,7 @@ const handleAction = async (inst: any, action: string) => {
       ocid: inst.ocid,
       action,
     })
-    message.success(`已下发 ${action} 指令`)
+    message.success(`已提交 ${action} 指令`)
     setTimeout(fetchInstances, 2000)
   } catch (e: any) {
     message.error(e.message)
@@ -427,7 +427,7 @@ const handleAction = async (inst: any, action: string) => {
 
 const handleRotateIP = (inst: any) => {
   const run = async () => {
-    const loadingMsg = message.loading('正在解绑旧 IP 并申请新 IP…', { duration: 0 })
+    const loadingMsg = message.loading('正在释放当前公网 IP 并申请新地址…', { duration: 0 })
     try {
       const res: any = await api.post('/instances/rotate-ip', {
         profile_id: profileStore.activeProfileId,
@@ -444,7 +444,7 @@ const handleRotateIP = (inst: any) => {
   }
   dialog.warning({
     title: '更换公网 IP',
-    content: `将释放 ${inst.display_name} 当前的公网 IP ${inst.public_ip || ''}，并申请一个新的临时公网 IP。旧 IP 无法找回。`,
+    content: `将释放 ${inst.display_name} 当前的公网 IP ${inst.public_ip || ''}，并申请新的临时公网 IP。原 IP 不可恢复。`,
     positiveText: '更换',
     negativeText: '取消',
     onPositiveClick: run,
@@ -456,7 +456,7 @@ const probeIP = async (ip: string) => {
   try {
     const res: any = await api.post('/instances/probe-ip', { ip, port: 22 })
     if (res.reachable) message.success(`${ip}:22 可连通`)
-    else message.warning(`${ip}:22 无响应，系统可能还在启动，或防火墙未放行`)
+    else message.warning(`${ip}:22 无响应：系统可能仍在启动，或防火墙未放行`)
   } catch (e: any) {
     message.error(e.message)
   } finally {
@@ -547,7 +547,7 @@ const netSeries = computed(() => {
 // ---------- resize / tags ----------
 const openResizeModal = (inst: any) => {
   if (!isFlexShape(inst.shape)) {
-    message.info('VM.Standard.E2.1.Micro 是固定 1 OCPU / 1 GB 的规格，无法改配')
+    message.info('VM.Standard.E2.1.Micro 为固定 1 OCPU / 1 GB 规格，不支持调整')
     return
   }
   selectedInst.value = inst
@@ -567,7 +567,7 @@ const submitResize = async () => {
       new_ocpu: resizeOCPU.value,
       new_memory: resizeMemory.value,
     })
-    message.success('改配指令已提交')
+    message.success('规格调整指令已提交')
     showResizeModal.value = false
     setTimeout(fetchInstances, 3000)
   } catch (e: any) {

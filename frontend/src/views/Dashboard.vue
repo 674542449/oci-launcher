@@ -15,7 +15,7 @@
 
     <!-- No accounts yet -->
     <div v-if="!profileStore.loading && profileStore.profiles.length === 0" class="card">
-      <EmptyState title="还没有导入任何 OCI 账号" description="先导入一个账号的 API 凭据，仪表盘会实时读取它的免费额度使用情况。">
+      <EmptyState title="尚未导入 OCI 账号" description="导入账号的 API 凭据后，仪表盘将实时读取其免费额度使用情况。">
         <n-button type="primary" @click="$router.push('/profiles')">导入账号</n-button>
       </EmptyState>
     </div>
@@ -151,9 +151,9 @@
         <div v-if="quota.estimated_monthly_fee > 0" class="notice notice-warn mt-4">
           <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
           <div>
-            <p class="font-semibold">当前配置已超过免费上限，会产生按量计费。</p>
+            <p class="font-semibold">当前配置已超出免费上限，将产生按量计费。</p>
             <p class="mt-0.5">
-              预估超出部分约 <b class="mono">${{ quota.estimated_monthly_fee.toFixed(2) }}</b> / 月（$0.01 每核时 + $0.0015 每 GB 时）。可在「实例」页面降配回免费水位。
+              预估超出部分约 <b class="mono">${{ quota.estimated_monthly_fee.toFixed(2) }}</b> / 月（$0.01 每核时 + $0.0015 每 GB 时）。可在「实例」页调整规格至免费额度内。
             </p>
           </div>
         </div>
@@ -161,7 +161,7 @@
 
       <!-- Failed to load -->
       <div v-else-if="!loading && currentProfile" class="card">
-        <EmptyState title="暂时读不到这个账号的配额" description="请检查账号凭据是否有效，或稍后重试。">
+        <EmptyState title="暂时无法读取该账号的配额" description="请检查账号凭据是否有效，或稍后重试。">
           <n-button secondary @click="fetchData">重试</n-button>
         </EmptyState>
       </div>
@@ -206,7 +206,7 @@ const detectedLabel = computed(() => {
 const profileStatusLabel = computed(() => {
   const s = currentProfile.value?.status
   if (s === 'Active') return '账号正常'
-  if (s === 'Banned') return '疑似封号 / 已停用'
+  if (s === 'Banned') return '疑似封禁 / 已停用'
   if (s === 'Invalid') return '凭据无效'
   return s || '状态未知'
 })

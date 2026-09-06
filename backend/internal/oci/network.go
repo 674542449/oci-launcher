@@ -95,7 +95,7 @@ func NormalizeCIDR(s string) (string, bool, error) {
 	if !strings.Contains(s, "/") {
 		ip := net.ParseIP(s)
 		if ip == nil {
-			return "", false, fmt.Errorf("来源 %q 不是合法的 IP 或 CIDR", s)
+			return "", false, fmt.Errorf("来源 %q 不是有效的 IP 或 CIDR", s)
 		}
 		if ip.To4() != nil {
 			return ip.String() + "/32", false, nil
@@ -104,7 +104,7 @@ func NormalizeCIDR(s string) (string, bool, error) {
 	}
 	ip, ipNet, err := net.ParseCIDR(s)
 	if err != nil {
-		return "", false, fmt.Errorf("来源 %q 不是合法的 CIDR", s)
+		return "", false, fmt.Errorf("来源 %q 不是有效的 CIDR", s)
 	}
 	isV6 := ip.To4() == nil
 	return ipNet.String(), isV6, nil
@@ -747,7 +747,7 @@ func applyIngressRules(ctx context.Context, profile *storage.OCIProfile, region,
 		return 0, nil
 	}
 	if len(merged) > maxIngressRulesPerSecurityList {
-		return 0, fmt.Errorf("安全列表最多 %d 条入站规则，当前 %d 条，再添加 %d 条会超限，请先清理规则",
+		return 0, fmt.Errorf("安全列表最多 %d 条入站规则，当前 %d 条，新增 %d 条将超出上限，请先清理规则",
 			maxIngressRulesPerSecurityList, len(getResp.SecurityList.IngressSecurityRules), added)
 	}
 

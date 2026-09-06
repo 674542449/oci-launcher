@@ -217,7 +217,7 @@ func upsertProfile(p iniProfile, pemContent, tags, notes string) (*storage.OCIPr
 		return nil, "", fmt.Errorf("私钥无法解析: %v", err)
 	}
 	if !strings.EqualFold(calc, p.Fingerprint) {
-		return nil, "", fmt.Errorf("私钥与配置块中的 fingerprint 不匹配（私钥指纹 %s，配置 %s）。请确认粘贴的是同一个 API 密钥", calc, p.Fingerprint)
+		return nil, "", fmt.Errorf("私钥与配置块中的 fingerprint 不匹配（私钥指纹 %s，配置 %s）。请确认使用同一 API 密钥", calc, p.Fingerprint)
 	}
 
 	keyEnc, err := security.EncryptAES256GCM(pemContent, config.GlobalConfig.MasterKey)
@@ -294,13 +294,13 @@ func ImportRawProfile(c *gin.Context) {
 	sections := parseOCIConfig(req.RawConfig)
 	if len(sections) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "未能从粘贴文本中解析出 tenancy, user, fingerprint, region。请粘贴 Oracle 控制台「添加 API 密钥」生成的配置块。",
+			"error": "未能从文本中解析出 tenancy、user、fingerprint、region。请粘贴 Oracle 控制台「添加 API 密钥」生成的配置块。",
 		})
 		return
 	}
 	if len(sections) > 1 {
 		c.JSON(http.StatusBadRequest, gin.H{
-			"error": fmt.Sprintf("粘贴内容包含 %d 个配置段，请一次只导入一个账号，或使用「同步宿主机配置」", len(sections)),
+			"error": fmt.Sprintf("文本包含 %d 个配置段，请每次仅导入一个账号，或使用「同步宿主机配置」", len(sections)),
 		})
 		return
 	}
@@ -440,7 +440,7 @@ func SyncLocalProfiles(c *gin.Context) {
 	}
 	if configPath == "" {
 		c.JSON(http.StatusOK, gin.H{
-			"message": "宿主机 ~/.oci/config 不存在，没有可同步的账号",
+			"message": "宿主机 ~/.oci/config 不存在，无可同步账号",
 			"count":   0,
 		})
 		return

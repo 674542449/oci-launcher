@@ -86,7 +86,7 @@ func ResizeBootVolume(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "引导卷扩容与性能调整指令已下发，请在虚拟机内执行扩容命令"})
+	c.JSON(http.StatusOK, gin.H{"message": "引导卷扩容与性能调整指令已提交，请在操作系统内执行扩容命令"})
 }
 
 // CreateBootVolumeBackup creates a backup

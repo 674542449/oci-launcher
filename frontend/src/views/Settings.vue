@@ -8,7 +8,7 @@
         <div class="card-head mb-5">
           <div>
             <h2 class="section-title">Telegram 通知</h2>
-            <p class="caption">开机成功、任务熔断、超额告警会推送到这个聊天。</p>
+            <p class="caption">创建成功、任务熔断与超额告警将推送至此聊天。</p>
           </div>
         </div>
         <n-form label-placement="top" :show-feedback="false" @submit.prevent="saveTelegramSettings">
@@ -30,7 +30,7 @@
               />
             </n-form-item>
           </div>
-          <p class="caption mt-1">已保存的 Token 会以掩码显示；重新粘贴完整 Token 即可覆盖。</p>
+          <p class="caption mt-1">已保存的 Token 以掩码显示；重新粘贴完整 Token 即可覆盖。</p>
           <div class="mt-4 flex flex-wrap justify-end gap-2">
             <n-button secondary :loading="testingTG" @click="testTelegram">
               <template #icon><n-icon><SendOutline /></n-icon></template>
@@ -46,7 +46,7 @@
         <div class="card-head mb-5">
           <div>
             <h2 class="section-title">修改管理员密码</h2>
-            <p class="caption">修改后所有已登录会话会被注销，需要重新登录。</p>
+            <p class="caption">修改后所有登录会话将被注销，需重新登录。</p>
           </div>
         </div>
         <n-form label-placement="top" :show-feedback="false" @submit.prevent="handleChangePassword">
@@ -81,7 +81,7 @@
         <div class="card-head card-pad pb-4">
           <div>
             <h2 class="section-title">SSH 公钥</h2>
-            <p class="caption">保存常用公钥，创建实例时直接选择。默认公钥按账号设置（在创建实例页选中后点"设为该账号默认"）。</p>
+            <p class="caption">保存常用公钥，创建实例时可直接选择。默认公钥按账号设置：在创建实例页选中后点击「设为该账号默认」。</p>
           </div>
           <n-button size="small" secondary @click="showAddKey = !showAddKey">
             <template #icon><n-icon><AddOutline /></n-icon></template>
@@ -113,7 +113,7 @@
             </div>
           </n-form>
         </div>
-        <EmptyState v-if="!loadingKeys && sshKeys.length === 0" title="还没有保存的公钥" description="添加后，创建实例时可以直接选择，不用再粘贴。" />
+        <EmptyState v-if="!loadingKeys && sshKeys.length === 0" title="尚未保存公钥" description="添加后创建实例时可直接选择，无需重复粘贴。" />
         <div v-else class="tbl-wrap border-t border-line">
           <table class="tbl">
             <thead>
@@ -150,14 +150,14 @@
         <div class="card-head card-pad pb-4">
           <div>
             <h2 class="section-title">IP 封禁</h2>
-            <p class="caption">密码连错 6 次封 30 分钟、12 次封 24 小时；验证码连错 15 次封 1 小时；触发蜜罐或扫描器特征封 24 小时。误封可在此解除。</p>
+            <p class="caption">密码连续错误 6 次封禁 30 分钟、12 次封禁 24 小时；验证码连续错误 15 次封禁 1 小时；命中蜜罐或扫描器特征封禁 24 小时。误封可在此解除。</p>
           </div>
           <n-button size="small" secondary :loading="loadingBans" @click="fetchBans">
             <template #icon><n-icon><RefreshOutline /></n-icon></template>
             刷新
           </n-button>
         </div>
-        <EmptyState v-if="!loadingBans && bans.length === 0" title="当前没有被封禁的 IP" :description="yourIP ? `你当前的访问 IP：${yourIP}` : ''" />
+        <EmptyState v-if="!loadingBans && bans.length === 0" title="当前无封禁 IP" :description="yourIP ? `当前访问 IP：${yourIP}` : ''" />
         <div v-else class="tbl-wrap border-t border-line">
           <table class="tbl">
             <thead>
@@ -187,7 +187,7 @@
         <div class="card-head card-pad pb-4">
           <div>
             <h2 class="section-title">安全审计日志</h2>
-            <p class="caption">只追加、不可修改。记录登录、配置变更、开机与删机等敏感操作，最近 200 条。</p>
+            <p class="caption">仅追加、不可修改。记录登录、配置变更、实例创建与删除等敏感操作，显示最近 200 条。</p>
           </div>
           <n-button size="small" secondary :loading="loadingLogs" @click="fetchAuditLogs">
             <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -195,7 +195,7 @@
           </n-button>
         </div>
 
-        <EmptyState v-if="!loadingLogs && auditLogs.length === 0" title="还没有审计记录" />
+        <EmptyState v-if="!loadingLogs && auditLogs.length === 0" title="暂无审计记录" />
         <div v-else class="tbl-wrap max-h-[480px] overflow-y-auto border-t border-line">
           <table class="tbl">
             <thead class="sticky top-0 z-10">
@@ -303,7 +303,7 @@ const onSettingsKeyFile = (event: Event) => {
   reader.onload = (e) => {
     const text = String(e.target?.result || '').trim()
     if (!/^(ssh-(rsa|ed25519|dss)|ecdsa-sha2-nistp\d+|sk-)/.test(text)) {
-      message.warning('这个文件看起来不是 SSH 公钥（应以 ssh-ed25519 或 ssh-rsa 开头）。请选择 .pub 文件，而不是私钥。')
+      message.warning('所选文件不是有效的 SSH 公钥（应以 ssh-ed25519 或 ssh-rsa 开头）。请选择 .pub 公钥文件，而非私钥。')
     } else {
       keyForm.value.public_key = text
       if (!keyForm.value.name.trim()) keyForm.value.name = file.name.replace(/\.pub$/i, '')
@@ -316,7 +316,7 @@ const onSettingsKeyFile = (event: Event) => {
 const removeKey = (k: any) => {
   dialog.warning({
     title: '删除公钥',
-    content: `删除「${k.name}」后，创建实例时将无法再选择它；已经创建的实例不受影响。`,
+    content: `删除「${k.name}」后，创建实例时将无法再选择该公钥；已创建的实例不受影响。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {
@@ -339,7 +339,7 @@ const copyKey = async (k: any) => {
     await navigator.clipboard.writeText(k.public_key)
     message.success('公钥已复制')
   } catch {
-    message.error('复制失败，请手动选择复制')
+    message.error('复制失败，请手动复制')
   }
 }
 

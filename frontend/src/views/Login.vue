@@ -21,7 +21,7 @@
             <div v-if="!bootstrapDone" class="space-y-5">
               <div>
                 <h2 class="text-[15px] font-semibold text-ink">初始化管理员</h2>
-                <p class="caption mt-1">首次使用，请创建管理员账号。下一步将绑定手机验证器（TOTP）。</p>
+                <p class="caption mt-1">首次使用请创建管理员账号，下一步绑定 TOTP 验证器。</p>
               </div>
               <n-form label-placement="top" :show-feedback="false" class="space-y-4" @submit.prevent="handleInitAdmin">
                 <n-form-item label="管理员账号">
@@ -45,7 +45,7 @@
             <div v-else class="space-y-5">
               <div>
                 <h2 class="text-[15px] font-semibold text-ink">绑定验证器</h2>
-                <p class="caption mt-1">用 Google Authenticator、1Password 或 Microsoft Authenticator 扫描二维码。</p>
+                <p class="caption mt-1">使用 Google Authenticator、1Password 或 Microsoft Authenticator 扫描二维码。</p>
               </div>
               <div class="flex justify-center">
                 <canvas ref="qrCanvas" class="rounded-lg border border-line bg-white p-2" aria-label="2FA 二维码"></canvas>
@@ -56,10 +56,10 @@
               </div>
               <div class="notice notice-warn">
                 <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
-                <span>密钥只显示这一次。丢失后需要重置数据库才能重新绑定。</span>
+                <span>密钥仅显示一次；丢失后需重置数据库方可重新绑定。</span>
               </div>
               <n-button type="primary" block size="large" @click="isUninitialized = false; step = 1">
-                已完成绑定，去登录
+                已完成绑定，前往登录
               </n-button>
             </div>
           </template>
@@ -101,7 +101,7 @@
             <n-form v-else label-placement="top" :show-feedback="false" class="space-y-4" @submit.prevent="handleStep2Verify">
               <div>
                 <h2 class="text-[15px] font-semibold text-ink">输入 6 位动态码</h2>
-                <p class="caption mt-1">打开手机验证器，输入当前显示的验证码。</p>
+                <p class="caption mt-1">打开验证器应用，输入当前验证码。</p>
               </div>
               <n-form-item label="动态码">
                 <n-input
@@ -116,7 +116,7 @@
                 />
               </n-form-item>
               <n-button type="primary" block attr-type="submit" :loading="loginLoading" size="large">登录</n-button>
-              <n-button quaternary block size="small" @click="step = 1">返回重新输入密码</n-button>
+              <n-button quaternary block size="small" @click="step = 1">返回密码输入</n-button>
             </n-form>
           </template>
         </div>

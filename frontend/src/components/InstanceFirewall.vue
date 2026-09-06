@@ -18,7 +18,7 @@
       <div class="notice notice-info">
         <n-icon size="18" class="mt-0.5 shrink-0"><ShieldCheckmarkOutline /></n-icon>
         <span>
-          这台实例还没有专属防火墙。启用后会创建一个只属于它的网络安全组（NSG），里面的规则只对这台实例生效；子网安全列表的规则仍然叠加生效（任一放行即放行）。
+          该实例尚未启用专属防火墙。启用后将创建一个仅关联该实例的网络安全组（NSG），其规则仅对该实例生效；子网安全列表的规则同时生效（任一放行即放行）。
         </span>
       </div>
       <div class="flex justify-end">
@@ -31,7 +31,7 @@
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="min-w-0 text-[13px] leading-5 text-ink-2">
           网络安全组 <span class="mono text-ink">{{ fw.nsg.name || maskOCID(fw.nsg.id) }}</span>
-          <span v-if="fw.other_nsg_count" class="caption ml-2">另有 {{ fw.other_nsg_count }} 个安全组也挂在这台实例上</span>
+          <span v-if="fw.other_nsg_count" class="caption ml-2">该实例另关联 {{ fw.other_nsg_count }} 个网络安全组</span>
         </div>
         <div class="flex items-center gap-2">
           <n-button size="small" secondary @click="openAdd">
@@ -49,8 +49,8 @@
       </div>
 
       <div v-if="!fw.rules.length" class="rounded-xl border border-dashed border-line px-4 py-6 text-center">
-        <div class="text-[13px] font-medium text-ink">还没有专属规则</div>
-        <p class="caption mt-1">现在只有子网安全列表在生效（默认放行 22 和 ICMP）。添加的规则只对这台实例生效。</p>
+        <div class="text-[13px] font-medium text-ink">尚无专属规则</div>
+        <p class="caption mt-1">当前仅子网安全列表生效（默认放行 22 与 ICMP）。此处添加的规则仅对该实例生效。</p>
       </div>
       <div v-else class="tbl-wrap rounded-xl border border-line">
         <table class="tbl">
@@ -77,7 +77,7 @@
         </table>
       </div>
 
-      <p class="caption">OCI 的判定是"子网安全列表或专属防火墙任一放行即放行"。子网安全列表保持最小，这台实例需要的端口放在这里。</p>
+      <p class="caption">OCI 的判定规则为：子网安全列表与专属防火墙任一放行即放行。子网安全列表宜保持最小规则，该实例所需端口在此配置。</p>
     </div>
 
     <!-- add rule -->
@@ -92,10 +92,10 @@
               <n-input v-model:value="addForm.source" class="mono" placeholder="0.0.0.0/0" :input-props="{ spellcheck: 'false' }" />
             </n-form-item>
           </div>
-          <p class="caption -mt-2">来源填单个 IP 会自动补成 /32；IPv4 全部为 <code class="mono">0.0.0.0/0</code>，IPv6 全部为 <code class="mono">::/0</code>。</p>
+          <p class="caption -mt-2">来源为单个 IP 时自动补全为 /32；IPv4 任意来源为 <code class="mono">0.0.0.0/0</code>，IPv6 任意来源为 <code class="mono">::/0</code>。</p>
 
           <n-form-item v-if="addForm.protocol === 'tcp' || addForm.protocol === 'udp'" label="目标端口">
-            <n-input v-model:value="addForm.ports" class="mono" placeholder="单个端口 22，或范围 8000-8100，留空表示全部端口" :input-props="{ spellcheck: 'false' }" />
+            <n-input v-model:value="addForm.ports" class="mono" placeholder="单个端口（22）或端口范围（8000-8100），留空表示全部端口" :input-props="{ spellcheck: 'false' }" />
           </n-form-item>
 
           <n-form-item label="说明（可选）">
@@ -224,7 +224,7 @@ const submitAdd = async () => {
   if (f.protocol === 'tcp' || f.protocol === 'udp') {
     const p = parsePorts(f.ports)
     if (p === null) {
-      message.warning('端口格式不正确：填单个端口如 22，或范围如 8000-8100')
+      message.warning('端口格式无效：请填写单个端口（如 22）或端口范围（如 8000-8100）')
       return
     }
     ;[portMin, portMax] = p
@@ -275,7 +275,7 @@ const confirmDelete = (r: any) => {
 // ---------- shortcuts (moved here from the subnet list) ----------
 const quickBusy = ref(false)
 const quickOptions: DropdownOption[] = [
-  { label: '放通 Cloudflare CDN 的 80 / 443', key: 'cf' },
+  { label: '放通 Cloudflare CDN 80/443', key: 'cf' },
   { label: '放通全部端口与协议', key: 'all' },
   { type: 'divider', key: 'd' },
   { label: '清空所有规则', key: 'clear', props: { style: 'color: var(--c-danger)' } },
@@ -298,7 +298,7 @@ const onQuick = (key: string) => {
   } else if (key === 'all') {
     dialog.warning({
       title: '放通全部端口与协议',
-      content: `将为 ${props.instance.display_name} 添加 0.0.0.0/0 与 ::/0 的全端口、全协议入站规则，它上面所有监听的服务都会暴露到公网。`,
+      content: `将为 ${props.instance.display_name} 添加来源为 0.0.0.0/0 与 ::/0 的全端口、全协议入站规则，该实例上所有监听服务将暴露于公网。`,
       positiveText: '放通全部',
       negativeText: '取消',
       onPositiveClick: () => runQuick('/instances/firewall/allow-all'),
@@ -306,7 +306,7 @@ const onQuick = (key: string) => {
   } else if (key === 'clear') {
     dialog.error({
       title: '清空所有规则',
-      content: `清空后 ${props.instance.display_name} 只剩子网安全列表的规则；如果安全列表已是最小规则，外部将无法连接任何端口，包括 SSH。`,
+      content: `清空后 ${props.instance.display_name} 仅受子网安全列表约束；若安全列表已为最小规则，外部将无法访问任何端口（含 SSH）。`,
       positiveText: '清空',
       negativeText: '取消',
       onPositiveClick: () => runQuick('/instances/firewall/clear'),
@@ -317,7 +317,7 @@ const onQuick = (key: string) => {
 const confirmRemove = () => {
   dialog.warning({
     title: '移除专属防火墙',
-    content: `将从 ${props.instance.display_name} 解绑并删除这个网络安全组，里面的 ${fw.value.rules.length} 条规则一起失效，之后只剩子网安全列表的规则。`,
+    content: `将从 ${props.instance.display_name} 解除关联并删除该网络安全组，其中 ${fw.value.rules.length} 条规则随之失效，此后仅子网安全列表生效。`,
     positiveText: '移除',
     negativeText: '取消',
     onPositiveClick: async () => {

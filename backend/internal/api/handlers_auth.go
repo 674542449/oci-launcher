@@ -289,6 +289,6 @@ func TriggerPanicLockdown(c *gin.Context) {
 	storage.LogAudit("PANIC_LOCKDOWN", user.Username, c.ClientIP(), c.GetHeader("User-Agent"), "EMERGENCY PANIC LOCKDOWN TRIGGERED", "LOCKED")
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "全站紧急锁定已触发！所有任务已停机，会话已吊销",
+		"message": "已触发全站紧急锁定：所有任务已停止，会话已吊销",
 	})
 }

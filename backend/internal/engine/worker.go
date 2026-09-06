@@ -399,12 +399,12 @@ func openAllPorts(ctx context.Context, profile *storage.OCIProfile, region, inst
 		return "专属防火墙设置失败（" + reason + "），请在「实例」页手动启用"
 	}
 	if _, err := oci.AllowAllNSGFor(ctx, profile, region, fw.NSG.ID, hasIPv6); err != nil {
-		return "专属防火墙已启用，但放通全部端口失败（" + err.Error() + "），请在「实例」页补上"
+		return "专属防火墙已启用，但放通全部端口失败（" + err.Error() + "），请在「实例」页补充配置"
 	}
 	if hasIPv6 {
-		return "专属防火墙已开放全部端口（IPv4 + IPv6）"
+		return "专属防火墙已放通全部端口（IPv4 + IPv6）"
 	}
-	return "专属防火墙已开放全部端口（IPv4）"
+	return "专属防火墙已放通全部端口（IPv4）"
 }
 
 // RunTaskWorker is the queued creation loop. For the ARM A1 shape it does not hammer
@@ -484,7 +484,7 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 			return
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			msg := fmt.Sprintf("排队已持续 %d 天，按上限自动停止；需要时可重新排队", cfg.RetryMaxDays)
+			msg := fmt.Sprintf("排队已持续 %d 天，达到上限自动停止；如需继续可重新排队", cfg.RetryMaxDays)
 			setTaskStatus(taskID, "stopped", msg)
 			emitLog(taskID.String(), currentTask.CurrentRetries, task.Region, "", "STOPPED", msg, 0)
 			return
@@ -496,7 +496,7 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 		} else if !ok {
 			wait := RandomRetryWait()
 			emitLog(taskID.String(), currentTask.CurrentRetries, task.Region, "", "WAIT",
-				fmt.Sprintf("等待账号并发锁：账号 ID %s 正在操作中，%d 秒后再试", lockedBy, int(wait.Seconds())), 0)
+				fmt.Sprintf("等待账号并发锁：账号 ID %s 正在操作中，%d 秒后重试", lockedBy, int(wait.Seconds())), 0)
 			if !sleepCtx(ctx, wait) {
 				return
 			}
@@ -535,8 +535,8 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 				available := oci.AvailableADs(reports)
 				if len(available) == 0 {
 					wait := CapacityPollWait()
-					setMessage(fmt.Sprintf("第 %d 次容量检查：%s。%d 秒后再查", round, summary, int(wait.Seconds())))
-					emitLog(taskID.String(), round, task.Region, "", "WAIT", fmt.Sprintf("容量检查：%s，%d 秒后再查", summary, int(wait.Seconds())), 0)
+					setMessage(fmt.Sprintf("第 %d 次容量检查：%s。%d 秒后再次检查", round, summary, int(wait.Seconds())))
+					emitLog(taskID.String(), round, task.Region, "", "WAIT", fmt.Sprintf("容量检查：%s，%d 秒后再次检查", summary, int(wait.Seconds())), 0)
 					if !sleepCtx(ctx, wait) {
 						return
 					}

@@ -16,11 +16,11 @@
           <div class="card-head card-pad pb-4">
             <div>
               <h2 class="section-title">引导卷</h2>
-              <p class="caption">在线扩容无需关机；扩容后需在系统内执行扩容命令。性能档位 10–120 VPU。</p>
+              <p class="caption">支持在线扩容，无需停机；扩容后需在操作系统内执行扩容命令。性能档位 10–120 VPU。</p>
             </div>
           </div>
           <SkeletonRows v-if="loading && bootVolumes.length === 0" />
-          <EmptyState v-else-if="bootVolumes.length === 0" title="没有引导卷" description="创建实例后，它的引导卷会显示在这里。" />
+          <EmptyState v-else-if="bootVolumes.length === 0" title="暂无引导卷" description="创建实例后，其引导卷将在此显示。" />
           <div v-else class="tbl-wrap border-t border-line">
             <table class="tbl">
               <thead>
@@ -50,7 +50,7 @@
                   </td>
                   <td class="text-right whitespace-nowrap">
                     <div class="inline-flex items-center gap-1.5">
-                      <n-button size="small" secondary @click="openResizeBVModal(bv)">扩容 / 调速</n-button>
+                      <n-button size="small" secondary @click="openResizeBVModal(bv)">扩容 / 性能</n-button>
                       <n-button size="small" secondary :disabled="!bv.grow_commands" @click="copyGrow(bv.grow_commands)">复制扩容命令</n-button>
                       <n-button size="small" secondary type="info" @click="openBackupModal(bv)">快照备份</n-button>
                     </div>
@@ -76,7 +76,7 @@
             </n-button>
           </div>
           <SkeletonRows v-if="loading && blockVolumes.length === 0" />
-          <EmptyState v-else-if="blockVolumes.length === 0" title="没有独立块存储卷" description="新建后可挂载到任意同可用区的实例。" />
+          <EmptyState v-else-if="blockVolumes.length === 0" title="暂无块存储卷" description="新建后可挂载至同可用区的任意实例。" />
           <div v-else class="tbl-wrap border-t border-line">
             <table class="tbl">
               <thead>
@@ -125,7 +125,7 @@
               创建存储桶
             </n-button>
           </div>
-          <EmptyState v-if="!loading && buckets.length === 0" title="没有存储桶" description="创建一个桶来存放静态文件或备份。" />
+          <EmptyState v-if="!loading && buckets.length === 0" title="暂无存储桶" description="创建存储桶以存放静态文件或备份。" />
           <div v-else class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             <div v-for="b in buckets" :key="b.name" class="rounded-lg border border-line bg-surface-2/60 p-4 transition-colors hover:border-line-strong">
               <div class="flex items-start justify-between gap-2">
@@ -150,7 +150,7 @@
     <!-- Resize boot volume -->
     <n-modal v-model:show="showResizeBVModal" preset="card" title="引导卷扩容与性能调整" style="max-width: 460px" :bordered="false">
       <div v-if="selectedBV" class="space-y-5">
-        <p class="caption">调整 <b class="text-ink">{{ selectedBV.display_name }}</b>。容量只能增大不能缩小，最大受 200 GB 免费额度约束。</p>
+        <p class="caption">调整 <b class="text-ink">{{ selectedBV.display_name }}</b>。容量仅可增大，上限受 200 GB 免费额度约束。</p>
         <div>
           <span class="label">目标容量（GB）</span>
           <n-input-number v-model:value="bvResizeForm.size" :min="selectedBV.size_in_gbs" :max="200" :step="10" class="w-full" />
@@ -194,7 +194,7 @@
         <div>
           <span class="label">可用区</span>
           <n-select v-model:value="newBlockForm.ad" :options="adOptions" placeholder="选择可用区" />
-          <p v-if="adOptions.length === 0" class="caption mt-1">读不到可用区列表。请先创建一个实例，或稍后重试。</p>
+          <p v-if="adOptions.length === 0" class="caption mt-1">无法读取可用区列表，请先创建实例或稍后重试。</p>
         </div>
         <div>
           <span class="label">容量（GB）</span>
@@ -322,7 +322,7 @@ const SkeletonRows = defineComponent({
 const copyGrow = async (cmd: string) => {
   try {
     await navigator.clipboard.writeText(cmd)
-    message.success('扩容命令已复制，SSH 登录后粘贴执行即可')
+    message.success('扩容命令已复制，SSH 登录后执行即可')
   } catch {
     message.error('复制失败，请手动复制')
   }
@@ -461,7 +461,7 @@ const submitCreateBucket = async () => {
 const deleteBucket = (bucketName: string) => {
   dialog.error({
     title: '删除存储桶',
-    content: `确定删除存储桶 ${bucketName} 吗？桶必须为空才能删除，删除后无法恢复。`,
+    content: `确定删除存储桶 ${bucketName} ？存储桶须为空方可删除，删除后不可恢复。`,
     positiveText: '删除',
     negativeText: '取消',
     onPositiveClick: async () => {

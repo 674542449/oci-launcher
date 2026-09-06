@@ -114,7 +114,7 @@ const handleLogout = async () => {
 const handlePanicLockdown = () => {
   dialog.error({
     title: '触发全站紧急锁定？',
-    content: '所有运行中的抢机任务将立即停止，所有登录会话将被强制注销。此操作用于账号疑似泄露等紧急情况。',
+    content: '所有排队中的创建任务将立即停止，所有登录会话将被强制注销。此操作用于疑似凭据泄露等紧急情况。',
     positiveText: '确认锁定',
     negativeText: '取消',
     onPositiveClick: async () => {

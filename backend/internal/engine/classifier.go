@@ -45,9 +45,9 @@ func ClassifyError(err error) (ErrorCategory, string) {
 
 		switch {
 		case status == 429:
-			return CategoryRateLimited, fmt.Sprintf("请求被限流 (429 %s)，启动指数退避", code)
+			return CategoryRateLimited, fmt.Sprintf("请求被限流 (429 %s)，执行指数退避", code)
 		case status == 500 && oci.IsCapacityMessage(lowerMsg):
-			return CategoryCapacityFull, "容量不足 (Out of host capacity)，等待下次轮询"
+			return CategoryCapacityFull, "容量不足 (Out of host capacity)，等待下次检查"
 		case status == 500 || status == 502 || status == 503 || status == 504:
 			return CategoryTransient, fmt.Sprintf("OCI 服务端临时错误 (%d %s)，稍后重试: %s", status, code, msg)
 		case status == 409:
@@ -55,7 +55,7 @@ func ClassifyError(err error) (ErrorCategory, string) {
 		case status == 401:
 			return CategoryFatalError, fmt.Sprintf("认证失败 (401 %s)：API 密钥无效、已吊销，或服务器时间偏差过大", code)
 		case status == 403 || status == 404:
-			return CategoryFatalError, fmt.Sprintf("无权限或资源不存在 (%d %s)：请检查子网/镜像/区间是否正确且用户有权限: %s", status, code, msg)
+			return CategoryFatalError, fmt.Sprintf("无权限或资源不存在 (%d %s)：请检查子网、镜像、区间是否正确及用户权限: %s", status, code, msg)
 		case status == 400 && strings.EqualFold(code, "LimitExceeded"):
 			return CategoryFatalError, fmt.Sprintf("超出服务限额 (400 LimitExceeded)：%s", msg)
 		case status == 400 && strings.EqualFold(code, "QuotaExceeded"):

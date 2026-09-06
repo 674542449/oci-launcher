@@ -55,7 +55,7 @@ func CheckSingleAccountHealth(ctx context.Context, profile *storage.OCIProfile) 
 				Where("profile_id = ? AND status = ?", profile.ID, "running").
 				Updates(map[string]interface{}{
 					"status":       "stopped",
-					"last_message": fmt.Sprintf("账号状态异常 (%s)，系统已自动熔断保护", status),
+					"last_message": fmt.Sprintf("账号状态异常 (%s)，系统已自动熔断", status),
 				})
 		}
 		return result, nil
@@ -118,7 +118,7 @@ func classifyHealthError(err error) (string, string, bool) {
 	case suspended:
 		return "Banned", "租户或用户已被停用/暂停（" + code + "），请登录 Oracle 控制台确认账号状态", true
 	case isSvc && httpStatus == 401:
-		return "Invalid", "API 凭据无效或已被吊销（401 " + code + "）。如果密钥确认无误，请检查服务器时间：与 Oracle 相差超过 5 分钟同样会返回 401", true
+		return "Invalid", "API 凭据无效或已被吊销（401 " + code + "）。若密钥确认无误，请检查服务器时间：与 Oracle 相差超过 5 分钟同样返回 401", true
 	case isSvc && (httpStatus == 403 || httpStatus == 404):
 		return "Error", fmt.Sprintf("权限不足或资源不可见（%d %s）。请确认该用户有读取服务限额的权限（inspect limits）", httpStatus, code), false
 	case isSvc && httpStatus == 429:

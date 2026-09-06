@@ -78,7 +78,7 @@ func acquireLockOrReject(c *gin.Context, profileID uint) bool {
 	}
 	if !ok {
 		c.JSON(http.StatusConflict, gin.H{
-			"error": "系统同一时间只允许操作一个 OCI 账号。账号 ID [" + lockedBy + "] 的任务正在运行，请先停止它或稍后再试。",
+			"error": "系统同一时间仅允许操作一个 OCI 账号。账号 ID [" + lockedBy + "] 的任务正在运行，请先停止该任务或稍后重试。",
 		})
 		return false
 	}
@@ -95,7 +95,7 @@ func ListTasks(c *gin.Context) {
 		Where("status = ? AND updated_at < ?", "creating", time.Now().Add(-3*time.Minute)).
 		Updates(map[string]interface{}{
 			"status":       "stopped",
-			"last_message": "创建流程被中断，未确认结果。请到「实例」页确认，需要时点「排队重试」",
+			"last_message": "创建流程已中断，结果未确认。请在「实例」页确认，如需继续可选择「排队重试」",
 		})
 
 	query := storage.DB.Order("created_at DESC")
@@ -225,14 +225,14 @@ func CreateTask(c *gin.Context) {
 		if r := recover(); r != nil {
 			log.Printf("[Task] CreateTask panic for %s: %v", task.ID, r)
 			releaseLock()
-			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": fmt.Sprintf("创建流程异常中断: %v。请到「实例」页确认是否已创建", r)})
+			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": fmt.Sprintf("创建流程异常中断: %v。请在「实例」页确认实例是否已创建", r)})
 			if !c.Writer.Written() {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("创建流程异常中断: %v", r)})
 			}
 			return
 		}
 		if !finalized {
-			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建流程未正常结束，请到「实例」页确认是否已创建"})
+			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建流程未正常结束，请在「实例」页确认实例是否已创建"})
 		}
 	}()
 
@@ -337,7 +337,7 @@ func CreateTask(c *gin.Context) {
 
 	reason := last.Reason
 	if last.Category == engine.CategoryCancelled {
-		reason = "创建请求超时，且云端暂未查到该实例，请重试（若稍后在「实例」页看到它，重试会自动识别为已创建）"
+		reason = "创建请求超时，云端暂未查询到该实例，请重试（若实例稍后出现在「实例」页，重试将自动识别为已创建）"
 	}
 	updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": "创建失败: " + reason + "（未排队）"})
 	task.Status, task.LastMessage = "stopped", "创建失败: "+reason+"（未排队）"
@@ -361,7 +361,7 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 	if task.Status == "success" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "该任务已经成功创建实例，请新建任务"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "该任务已成功创建实例，请新建任务"})
 		return
 	}
 	if task.Status == "creating" {
@@ -369,7 +369,7 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 	if task.Status == "running" && engine.IsTaskActive(taskID) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "任务已在排队重试中"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "任务已在排队中"})
 		return
 	}
 
@@ -395,7 +395,7 @@ func StartExistingTask(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "已加入排队，每 60-180 秒随机重试一次，直到创建成功"})
+	c.JSON(http.StatusOK, gin.H{"message": "已加入排队：ARM A1 按容量报告创建，AMD Micro 按间隔尝试，直至创建成功或达到上限"})
 }
 
 // StopExistingTask stops a queued task
@@ -451,7 +451,7 @@ func ListPresets(c *gin.Context) {
 	}
 
 	presets := []preset{{
-		ID: 1, Name: "AMD 微型机 1C / 1G", Shape: "VM.Standard.E2.1.Micro",
+		ID: 1, Name: "AMD Micro 1C / 1G", Shape: "VM.Standard.E2.1.Micro",
 		OCPU: 1, MemoryInGBs: 1, BootVolumeSizeInGBs: 50, BootVolumeVPU: 10, LoginMode: "root_key", EnableIPv6: true,
 	}}
 	id := 2
@@ -580,7 +580,7 @@ func TestTelegram(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "请先保存 Bot Token 和 Chat ID"})
 		return
 	}
-	text := "🔔 <b>OCI 控制台测试消息</b>\nTelegram 通知配置正常，实例创建成功与任务熔断告警会发送到这里。"
+	text := "🔔 <b>OCI 控制台测试消息</b>\nTelegram 通知配置正常，实例创建成功与任务熔断告警将发送至此。"
 	if err := notify.SendTelegramMessage(botToken, chatID, text); err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": "发送失败: " + err.Error()})
 		return

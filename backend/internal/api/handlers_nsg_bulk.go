@@ -55,7 +55,7 @@ func AllowCloudflareInstanceFirewall(c *gin.Context) {
 		return
 	}
 	storage.LogAudit("INSTANCE_FIREWALL_ALLOW_CF", profile.Name, c.ClientIP(), c.GetHeader("User-Agent"), req.NSGID, "SUCCESS")
-	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已放通 Cloudflare 节点的 80/443（新增 %d 条规则）", added), "added": added})
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已放通 Cloudflare 节点 80/443（新增 %d 条规则）", added), "added": added})
 }
 
 // ClearInstanceFirewall removes every ingress rule from the instance's NSG.

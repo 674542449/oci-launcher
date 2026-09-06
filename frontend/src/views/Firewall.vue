@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="防火墙" description="子网安全列表（Security List）对子网里的每台实例生效，只作为最小底座；各实例的端口在「实例」页的专属防火墙里设置。">
+    <PageHeader title="防火墙" description="子网安全列表（Security List）对子网内全部实例生效，仅作为基础规则；各实例的端口放行在「实例」页的专属防火墙中配置。">
       <template #actions>
         <span v-if="selectedSecListID && isMinimal" class="pill pill-ok">已是最小规则</span>
         <n-button v-else-if="selectedSecListID" secondary type="warning" :loading="operating" @click="handleResetMinimal">恢复为最小规则</n-button>
@@ -35,13 +35,13 @@
     <div v-if="selectedSubnet && unprotected.length" class="notice notice-warn mb-4">
       <n-icon size="18" class="mt-0.5 shrink-0"><ShieldCheckmarkOutline /></n-icon>
       <span>
-        这个子网里还有 {{ unprotected.length }} 台实例没有专属防火墙：<b class="mono text-ink">{{ unprotected.map((i) => i.display_name).join('、') }}</b>。
-        它们只受这份安全列表约束，删掉 22 前请先到<router-link to="/instances" class="txt-btn">「实例」页</router-link>为它们启用专属防火墙。
+        该子网内尚有 {{ unprotected.length }} 台实例未启用专属防火墙：<b class="mono text-ink">{{ unprotected.map((i) => i.display_name).join('、') }}</b>。
+        这些实例仅受本安全列表约束，删除 22 端口规则前请先在<router-link to="/instances" class="txt-btn">「实例」页</router-link>为其启用专属防火墙。
       </span>
     </div>
     <div v-else-if="selectedSubnet && subnetInstances.length" class="notice notice-info mb-4">
       <n-icon size="18" class="mt-0.5 shrink-0"><ShieldCheckmarkOutline /></n-icon>
-      <span>子网里的 {{ subnetInstances.length }} 台实例都有专属防火墙。这份安全列表保持最小即可：入站只留两条 ICMP，出站全部放行。</span>
+      <span>该子网内 {{ subnetInstances.length }} 台实例均已启用专属防火墙。本安全列表可保持最小规则：入站仅保留两条 ICMP，出站全部放行。</span>
     </div>
 
     <!-- Rules -->
@@ -67,13 +67,13 @@
       </div>
       <EmptyState
         v-else-if="!selectedSecListID"
-        title="先选择一个 VCN 和子网"
-        description="没有 VCN？在「创建实例」页面可以一键创建推荐网络。"
+        title="请选择 VCN 与子网"
+        description="尚无 VCN 时，可在「创建实例」页一键创建推荐网络。"
       />
       <EmptyState
         v-else-if="rules.length === 0"
-        title="这个安全列表没有任何入站规则"
-        description="外部网络目前无法连接任何端口。点右上角「添加规则」放行需要的端口。"
+        title="该安全列表没有入站规则"
+        description="外部网络当前无法访问任何端口。使用右上角「添加规则」放行所需端口。"
       >
         <n-button type="primary" @click="openAddModal">添加规则</n-button>
       </EmptyState>
@@ -110,10 +110,10 @@
       <div class="card-head card-pad pb-4">
         <div>
           <h2 class="section-title">出站规则</h2>
-          <p class="caption">Egress rules · 共 {{ egress.length }} 条 · 只读，最小规则下保持全部放行</p>
+          <p class="caption">Egress rules · 共 {{ egress.length }} 条 · 只读；最小规则下保持全部放行</p>
         </div>
       </div>
-      <EmptyState v-if="egress.length === 0" title="没有出站规则" description="实例将无法主动连接外部网络，建议至少保留一条全部放行。" />
+      <EmptyState v-if="egress.length === 0" title="没有出站规则" description="实例将无法主动访问外部网络，建议至少保留一条全部放行规则。" />
       <div v-else class="tbl-wrap border-t border-line">
         <table class="tbl">
           <thead>
@@ -150,17 +150,17 @@
               <n-input v-model:value="addForm.source" class="mono" placeholder="0.0.0.0/0" :input-props="{ spellcheck: 'false' }" />
             </n-form-item>
           </div>
-          <p class="caption -mt-2">来源填单个 IP 会自动补成 /32；IPv6 全部为 <code class="mono">::/0</code>，IPv4 全部为 <code class="mono">0.0.0.0/0</code>。</p>
+          <p class="caption -mt-2">来源为单个 IP 时自动补全为 /32；IPv6 任意来源为 <code class="mono">::/0</code>，IPv4 任意来源为 <code class="mono">0.0.0.0/0</code>。</p>
 
           <n-form-item v-if="addForm.protocol === 'tcp' || addForm.protocol === 'udp'" label="目标端口">
-            <n-input v-model:value="addForm.ports" class="mono" placeholder="单个端口 22，或范围 8000-8100，留空表示全部端口" :input-props="{ spellcheck: 'false' }" />
+            <n-input v-model:value="addForm.ports" class="mono" placeholder="单个端口（22）或端口范围（8000-8100），留空表示全部端口" :input-props="{ spellcheck: 'false' }" />
           </n-form-item>
 
           <n-form-item label="说明（可选）">
             <n-input v-model:value="addForm.description" placeholder="例如：SSH、Web、WireGuard" maxlength="255" />
           </n-form-item>
 
-          <n-checkbox v-model:checked="addForm.is_stateless">无状态规则（一般不需要勾选）</n-checkbox>
+          <n-checkbox v-model:checked="addForm.is_stateless">无状态规则（通常无需勾选）</n-checkbox>
 
           <div v-if="addPreview" class="rounded-lg border border-line bg-surface-2 px-3 py-2 text-xs text-ink-2">
             将添加：<span class="mono text-ink">{{ addPreview }}</span>
@@ -351,11 +351,11 @@ const unprotected = computed(() => subnetInstances.value.filter((i) => !i.has_ns
 
 const handleResetMinimal = () => {
   const warn = unprotected.value.length
-    ? `注意：子网里还有 ${unprotected.value.length} 台实例没有专属防火墙，恢复后它们的 22 端口也会关闭。`
-    : '子网里的实例都有专属防火墙，恢复后端口完全由各实例自己的规则决定。'
+    ? `注意：该子网内尚有 ${unprotected.value.length} 台实例未启用专属防火墙，恢复后其 22 端口将被关闭。`
+    : '该子网内实例均已启用专属防火墙，恢复后端口放行完全由各实例的规则决定。'
   dialog.warning({
     title: '恢复为最小规则',
-    content: `入站将只保留两条 ICMP 规则（路径 MTU 探测、VCN 内不可达通知），删除包括 22 在内的其他所有入站规则；出站保持全部放行。${warn}`,
+    content: `入站将仅保留两条 ICMP 规则（路径 MTU 发现、VCN 内不可达通知），其余入站规则（含 22）将被删除；出站保持全部放行。${warn}`,
     positiveText: '恢复',
     negativeText: '取消',
     onPositiveClick: () => runFirewallAction('/network/reset-minimal'),
@@ -378,7 +378,7 @@ const submitAddRule = async () => {
   if (f.protocol === 'tcp' || f.protocol === 'udp') {
     const p = parsePorts(f.ports)
     if (p === null) {
-      message.warning('端口格式不对：填单个端口如 22，或范围如 8000-8100')
+      message.warning('端口格式无效：请填写单个端口（如 22）或端口范围（如 8000-8100）')
       return
     }
     ;[portMin, portMax] = p
@@ -408,7 +408,7 @@ const submitAddRule = async () => {
 
 const confirmDeleteRule = (r: any) => {
   dialog.warning({
-    title: '删除这条入站规则',
+    title: '删除入站规则',
     content: `${r.protocol} 来自 ${r.source}，端口 ${r.port_range || 'ALL'}${r.description ? '（' + r.description + '）' : ''}。删除后对应端口将无法从外部访问。`,
     positiveText: '删除',
     negativeText: '取消',
