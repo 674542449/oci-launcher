@@ -117,9 +117,9 @@
         <span>{{ metricsError }}</span>
       </div>
       <div v-else-if="metrics" class="space-y-5">
-        <div class="flex flex-wrap items-center gap-3">
-          <span class="pill" :class="riskPill.cls">{{ riskPill.label }}</span>
-          <span class="text-[13px] leading-5 text-ink-2">{{ metrics.note }}</span>
+        <div v-if="!metrics.data_available" class="notice notice-info">
+          <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
+          <span>{{ metrics.note }}</span>
         </div>
 
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-3">
@@ -129,10 +129,10 @@
               <span class="text-[13px] font-semibold text-ink">CPU</span>
               <span class="caption">7 天 95 分位</span>
             </div>
-            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.cpu.points.length ? valueTone(metrics.cpu.p95) : 'text-ink-3'">
+            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.cpu.points.length ? 'text-ink' : 'text-ink-3'">
               {{ metrics.cpu.points.length ? fmtPct(metrics.cpu.p95) : '—' }}<span class="text-sm font-normal text-ink-3">%</span>
             </div>
-            <Sparkline class="mt-3" :points="metrics.cpu.points" :max="100" :threshold="metrics.threshold" unit="%" aria-label="CPU 利用率，近 7 天逐小时" />
+            <Sparkline class="mt-3" :points="metrics.cpu.points" :max="100" unit="%" aria-label="CPU 利用率，近 7 天逐小时" />
             <div class="mono mt-2 flex justify-between text-xs text-ink-3">
               <span>均值 {{ fmtPct(metrics.cpu.avg) }}%</span>
               <span>峰值 {{ fmtPct(metrics.cpu.max) }}%</span>
@@ -144,10 +144,10 @@
               <span class="text-[13px] font-semibold text-ink">内存</span>
               <span class="caption">7 天均值</span>
             </div>
-            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.memory.points.length ? valueTone(metrics.memory.avg) : 'text-ink-3'">
+            <div class="mono mt-1 text-2xl font-semibold leading-8" :class="metrics.memory.points.length ? 'text-ink' : 'text-ink-3'">
               {{ metrics.memory.points.length ? fmtPct(metrics.memory.avg) : '—' }}<span class="text-sm font-normal text-ink-3">%</span>
             </div>
-            <Sparkline class="mt-3" :points="metrics.memory.points" :max="100" :threshold="metrics.threshold" unit="%" aria-label="内存利用率，近 7 天逐小时" />
+            <Sparkline class="mt-3" :points="metrics.memory.points" :max="100" unit="%" aria-label="内存利用率，近 7 天逐小时" />
             <div class="mono mt-2 flex justify-between text-xs text-ink-3">
               <span>95 分位 {{ fmtPct(metrics.memory.p95) }}%</span>
               <span>峰值 {{ fmtPct(metrics.memory.max) }}%</span>
@@ -170,9 +170,7 @@
           </div>
         </div>
 
-        <p class="caption">
-          虚线是 Oracle 的 20% 回收线：Always Free 实例若连续 7 天 CPU 95 分位、内存和网络利用率都低于它，可能被回收。数据来自实例内 Oracle Cloud Agent 的监控插件，按小时聚合，悬停查看逐小时数值。
-        </p>
+        <p class="caption">数据来自实例内 Oracle Cloud Agent 的监控插件，按小时聚合，悬停查看逐小时数值。</p>
       </div>
     </n-modal>
 
@@ -507,7 +505,6 @@ const fmtBytes = (bytes: number) => {
   if (b >= 1e6) return { value: (b / 1e6).toFixed(1), unit: ' MB', text: `${(b / 1e6).toFixed(1)} MB` }
   return { value: (b / 1e3).toFixed(0), unit: ' KB', text: `${(b / 1e3).toFixed(0)} KB` }
 }
-const valueTone = (v: number) => (v < (metrics.value?.threshold ?? 20) ? 'text-danger' : 'text-ink')
 
 // hourly in + out, in MB, for the network sparkline
 const netSeries = computed(() => {
@@ -518,14 +515,6 @@ const netSeries = computed(() => {
   return Array.from(byTime.entries())
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .map(([t, v]) => ({ t, v: v / 1e6 }))
-})
-
-const riskPill = computed(() => {
-  const m = metrics.value
-  if (!m || m.idle_risk === 'unknown') return { cls: 'pill-muted', label: '无监控数据' }
-  if (m.idle_risk === 'high') return { cls: 'pill-danger', label: '回收风险高' }
-  if (m.idle_days > 0) return { cls: 'pill-warn', label: `已连续 ${m.idle_days} 天低于回收线` }
-  return { cls: 'pill-ok', label: '负载正常' }
 })
 
 // ---------- resize / tags ----------

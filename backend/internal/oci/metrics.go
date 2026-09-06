@@ -14,12 +14,7 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/monitoring"
 )
 
-const (
-	metricsWindowDays = 7
-	// reclaimThreshold is Oracle's Always Free idle rule: an instance whose CPU 95th percentile,
-	// memory and network usage all stay under 20 % for 7 days may be reclaimed.
-	reclaimThreshold = 20.0
-)
+const metricsWindowDays = 7
 
 type MetricPoint struct {
 	T string  `json:"t"` // RFC3339 UTC
@@ -37,21 +32,17 @@ type InstanceMetrics struct {
 	InstanceOCID  string       `json:"instance_ocid"`
 	WindowDays    int          `json:"window_days"`
 	Resolution    string       `json:"resolution"`
-	Threshold     float64      `json:"threshold"`
 	DataAvailable bool         `json:"data_available"`
 	CPU           MetricSeries `json:"cpu"`     // percent
 	Memory        MetricSeries `json:"memory"`  // percent (empty when the agent does not report it)
 	NetIn         MetricSeries `json:"net_in"`  // bytes per hour
 	NetOut        MetricSeries `json:"net_out"` // bytes per hour
 	NetTotalBytes float64      `json:"net_total_bytes"`
-	IdleRisk      string       `json:"idle_risk"` // "high" | "low" | "unknown"
-	IdleDays      int          `json:"idle_days"` // consecutive most-recent days under the reclaim line
-	Note          string       `json:"note"`
+	Note          string       `json:"note"` // only set when there is nothing to show
 }
 
-// GetInstanceMetrics reads 7 days of hourly compute-agent metrics for one instance and applies
-// Oracle's idle-reclaim rule to them. Network has no percentage metric, so the verdict rests on
-// CPU (95th percentile) and memory; network volume is reported for context.
+// GetInstanceMetrics reads 7 days of hourly compute-agent metrics for one instance: CPU and
+// memory utilization (percent) and network volume.
 //
 // NetworksBytesIn/Out are cumulative counters (sampled every 10 s, reset when the OS restarts),
 // so they are read with increment(): the change per hour is the bytes moved in that hour. A
@@ -102,7 +93,7 @@ func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region
 		out        *MetricSeries
 		err        error
 	}
-	result := &InstanceMetrics{InstanceOCID: instanceOCID, WindowDays: metricsWindowDays, Resolution: "1h", Threshold: reclaimThreshold}
+	result := &InstanceMetrics{InstanceOCID: instanceOCID, WindowDays: metricsWindowDays, Resolution: "1h"}
 	jobs := []*job{
 		{metric: "CpuUtilization", fn: "mean", out: &result.CPU},
 		{metric: "MemoryUtilization", fn: "mean", out: &result.Memory},
@@ -135,26 +126,10 @@ func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region
 	}
 
 	if len(result.CPU.Points) == 0 {
-		result.IdleRisk = "unknown"
 		result.Note = "没有监控数据：实例内的 Oracle Cloud Agent 监控插件未启用，或实例刚创建不久"
 		return result, nil
 	}
 	result.DataAvailable = true
-	result.IdleDays = consecutiveIdleDays(result.CPU.Points, result.Memory.Points, now)
-
-	cpuIdle := result.CPU.P95 < reclaimThreshold
-	memIdle := len(result.Memory.Points) == 0 || result.Memory.Avg < reclaimThreshold
-	switch {
-	case cpuIdle && memIdle && result.IdleDays >= metricsWindowDays:
-		result.IdleRisk = "high"
-		result.Note = fmt.Sprintf("近 %d 天 CPU 95 分位 %.1f%%、内存均值 %.1f%%，都低于 20%% 回收线，Oracle 可能回收该实例", metricsWindowDays, result.CPU.P95, result.Memory.Avg)
-	case cpuIdle && memIdle:
-		result.IdleRisk = "low"
-		result.Note = fmt.Sprintf("已连续 %d 天低于 20%% 回收线（满 7 天才会触发回收），CPU 95 分位 %.1f%%", result.IdleDays, result.CPU.P95)
-	default:
-		result.IdleRisk = "low"
-		result.Note = fmt.Sprintf("近 %d 天有足够负载：CPU 95 分位 %.1f%%，内存均值 %.1f%%", metricsWindowDays, result.CPU.P95, result.Memory.Avg)
-	}
 	return result, nil
 }
 
@@ -180,51 +155,4 @@ func summarize(pts []MetricPoint) MetricSeries {
 	}
 	s.P95 = vals[idx]
 	return s
-}
-
-// consecutiveIdleDays counts, from the most recent day backwards, how many days had a CPU
-// 95th percentile and a memory mean under the reclaim line (a day without data breaks the run).
-func consecutiveIdleDays(cpu, mem []MetricPoint, now time.Time) int {
-	day := func(t string) string {
-		parsed, err := time.Parse(time.RFC3339, t)
-		if err != nil {
-			return ""
-		}
-		return parsed.UTC().Format("2006-01-02")
-	}
-	cpuByDay := map[string][]float64{}
-	for _, p := range cpu {
-		cpuByDay[day(p.T)] = append(cpuByDay[day(p.T)], p.V)
-	}
-	memByDay := map[string][]float64{}
-	for _, p := range mem {
-		memByDay[day(p.T)] = append(memByDay[day(p.T)], p.V)
-	}
-
-	count := 0
-	for d := 0; d < metricsWindowDays; d++ {
-		key := now.Add(-time.Duration(d) * 24 * time.Hour).UTC().Format("2006-01-02")
-		vals := cpuByDay[key]
-		if len(vals) == 0 {
-			if d == 0 {
-				continue // today may not have a full hour yet
-			}
-			break
-		}
-		sort.Float64s(vals)
-		p95 := vals[int(math.Ceil(0.95*float64(len(vals))))-1]
-		memAvg := 0.0
-		if mv := memByDay[key]; len(mv) > 0 {
-			var sum float64
-			for _, v := range mv {
-				sum += v
-			}
-			memAvg = sum / float64(len(mv))
-		}
-		if p95 >= reclaimThreshold || memAvg >= reclaimThreshold {
-			break
-		}
-		count++
-	}
-	return count
 }

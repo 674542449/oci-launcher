@@ -10,12 +10,6 @@
       @touchstart.passive="onMove"
       @touchmove.passive="onMove"
     >
-      <!-- Everything under the reclaim line: the zone Oracle counts as idle -->
-      <template v-if="hasThreshold">
-        <rect :x="PAD" :y="yOf(threshold!)" :width="W - PAD * 2" :height="H - PAD - yOf(threshold!)" style="fill: var(--c-danger)" fill-opacity="0.07" />
-        <line :x1="PAD" :x2="W - PAD" :y1="yOf(threshold!)" :y2="yOf(threshold!)" style="stroke: var(--c-danger)" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" />
-      </template>
-
       <path v-if="areaPath" :d="areaPath" style="fill: var(--c-ink)" fill-opacity="0.06" />
       <path v-if="linePath" :d="linePath" fill="none" style="stroke: var(--c-ink-2)" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke" />
       <line :x1="PAD" :x2="W - PAD" :y1="H - PAD" :y2="H - PAD" style="stroke: var(--c-line)" stroke-width="1" vector-effect="non-scaling-stroke" />
@@ -46,8 +40,6 @@ const props = withDefaults(
     points: Point[]
     /** fixed scale top (e.g. 100 for percentages); auto when omitted */
     max?: number
-    /** dashed reference line, e.g. Oracle's 20 % reclaim threshold */
-    threshold?: number
     unit?: string
     decimals?: number
     ariaLabel?: string
@@ -61,13 +53,10 @@ const PAD = 4
 
 const hover = ref(-1)
 
-const hasThreshold = computed(() => props.threshold !== undefined && props.threshold > 0)
-
 const scaleMax = computed(() => {
   if (props.max && props.max > 0) return props.max
   let m = 0
   for (const p of props.points) if (p.v > m) m = p.v
-  if (hasThreshold.value) m = Math.max(m, props.threshold! * 1.25)
   return m > 0 ? m * 1.1 : 1
 })
 

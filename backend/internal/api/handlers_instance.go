@@ -69,8 +69,7 @@ func ListInstances(c *gin.Context) {
 	})
 }
 
-// InstanceMetrics returns 7 days of hourly CPU / memory / network usage for one instance together
-// with Oracle's idle-reclaim verdict.
+// InstanceMetrics returns 7 days of hourly CPU / memory / network usage for one instance.
 func InstanceMetrics(c *gin.Context) {
 	profile, ok := profileFromQuery(c)
 	if !ok {
