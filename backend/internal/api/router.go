@@ -111,6 +111,9 @@ func SetupRouter() *gin.Engine {
 			protected.POST("/instances/firewall/disable", DisableInstanceFirewall)
 			protected.POST("/instances/firewall/rules/add", AddInstanceFirewallRule)
 			protected.POST("/instances/firewall/rules/delete", DeleteInstanceFirewallRule)
+			protected.POST("/instances/firewall/allow-all", AllowAllInstanceFirewall)
+			protected.POST("/instances/firewall/allow-cloudflare", AllowCloudflareInstanceFirewall)
+			protected.POST("/instances/firewall/clear", ClearInstanceFirewall)
 
 			// Storage
 			protected.GET("/storage/boot-volumes", ListBootVolumes)
@@ -130,9 +133,7 @@ func SetupRouter() *gin.Engine {
 			protected.GET("/network/security-rules", ListSecurityRules)
 			protected.POST("/network/security-rules/add", AddSecurityRule)
 			protected.POST("/network/security-rules/delete", DeleteSecurityRule)
-			protected.POST("/network/allow-all", AllowAllFirewall)
-			protected.POST("/network/clear-all", ClearAllFirewall)
-			protected.POST("/network/allow-cloudflare", AllowCloudflareCDN)
+			protected.POST("/network/reset-minimal", ResetSecurityListMinimal)
 
 			// Tasks
 			protected.GET("/tasks", ListTasks)

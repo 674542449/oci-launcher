@@ -99,9 +99,9 @@
                     <template #icon><n-icon><PulseOutline /></n-icon></template>
                     利用率
                   </n-button>
-                  <n-button size="small" secondary @click="openFirewall(inst)">
+                  <n-button size="small" secondary :title="inst.has_nsg ? '已启用专属防火墙' : '未启用专属防火墙'" @click="openFirewall(inst)">
                     <template #icon><n-icon><ShieldCheckmarkOutline /></n-icon></template>
-                    防火墙
+                    防火墙<span v-if="inst.has_nsg" class="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-ok" aria-hidden="true"></span>
                   </n-button>
                   <n-dropdown trigger="click" :options="moreOptions(inst)" placement="bottom-end" @select="(key: string) => onMore(key, inst)">
                     <n-button size="small" secondary aria-label="更多操作">

@@ -1,13 +1,8 @@
 <template>
   <div>
-    <PageHeader title="防火墙" description="查看并修改子网安全列表（Security List）的入站规则。">
+    <PageHeader title="防火墙" description="子网安全列表（Security List）对子网里的每台实例生效，只作为最小底座；各实例的端口在「实例」页的专属防火墙里设置。">
       <template #actions>
-        <n-button secondary :loading="operating" :disabled="!selectedSecListID" @click="handleAllowCloudflare">
-          <template #icon><n-icon><ShieldCheckmarkOutline /></n-icon></template>
-          放通 Cloudflare 80/443
-        </n-button>
-        <n-button secondary type="success" :loading="operating" :disabled="!selectedSecListID" @click="handleAllowAll">放通全部</n-button>
-        <n-button secondary type="error" :loading="operating" :disabled="!selectedSecListID" @click="handleClearAll">清空入站规则</n-button>
+        <n-button secondary type="warning" :loading="operating" :disabled="!selectedSecListID" @click="handleResetMinimal">恢复为最小规则</n-button>
         <n-button type="primary" :disabled="!selectedSecListID" @click="openAddModal">
           <template #icon><n-icon><AddOutline /></n-icon></template>
           添加规则
@@ -33,6 +28,19 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- Instances in this subnet without their own firewall -->
+    <div v-if="selectedSubnet && unprotected.length" class="notice notice-warn mb-4">
+      <n-icon size="18" class="mt-0.5 shrink-0"><ShieldCheckmarkOutline /></n-icon>
+      <span>
+        这个子网里还有 {{ unprotected.length }} 台实例没有专属防火墙：<b class="mono text-ink">{{ unprotected.map((i) => i.display_name).join('、') }}</b>。
+        它们只受这份安全列表约束，删掉 22 前请先到<router-link to="/instances" class="txt-btn">「实例」页</router-link>为它们启用专属防火墙。
+      </span>
+    </div>
+    <div v-else-if="selectedSubnet && subnetInstances.length" class="notice notice-info mb-4">
+      <n-icon size="18" class="mt-0.5 shrink-0"><ShieldCheckmarkOutline /></n-icon>
+      <span>子网里的 {{ subnetInstances.length }} 台实例都有专属防火墙。这份安全列表保持最小即可：入站只留两条 ICMP，出站全部放行。</span>
     </div>
 
     <!-- Rules -->
@@ -288,27 +296,33 @@ const runFirewallAction = async (path: string) => {
   }
 }
 
-const handleAllowAll = () => {
+// Instances of the current account, to point out which ones in this subnet still rely on
+// the shared list alone.
+const instances = ref<any[]>([])
+const loadInstances = async () => {
+  if (!profileStore.activeProfileId) return
+  try {
+    const res: any = await api.get(`/instances?profile_id=${profileStore.activeProfileId}`)
+    instances.value = res.instances || []
+  } catch {
+    instances.value = []
+  }
+}
+const subnetInstances = computed(() => instances.value.filter((i) => i.subnet_id === selectedSubnet.value && i.state !== 'TERMINATED'))
+const unprotected = computed(() => subnetInstances.value.filter((i) => !i.has_nsg))
+
+const handleResetMinimal = () => {
+  const warn = unprotected.value.length
+    ? `注意：子网里还有 ${unprotected.value.length} 台实例没有专属防火墙，恢复后它们的 22 端口也会关闭。`
+    : '子网里的实例都有专属防火墙，恢复后端口完全由各实例自己的规则决定。'
   dialog.warning({
-    title: '放通全部端口与协议',
-    content: '将为 0.0.0.0/0 与 ::/0 添加全端口、全协议的入站放行规则。实例上所有监听的服务都会暴露到公网。',
-    positiveText: '放通全部',
+    title: '恢复为最小规则',
+    content: `入站将只保留两条 ICMP 规则（路径 MTU 探测、VCN 内不可达通知），删除包括 22 在内的其他所有入站规则；出站保持全部放行。${warn}`,
+    positiveText: '恢复',
     negativeText: '取消',
-    onPositiveClick: () => runFirewallAction('/network/allow-all'),
+    onPositiveClick: () => runFirewallAction('/network/reset-minimal'),
   })
 }
-
-const handleClearAll = () => {
-  dialog.error({
-    title: '清空所有入站规则',
-    content: '清空后外部网络将无法连接任何端口，包括 SSH。确定继续？',
-    positiveText: '清空',
-    negativeText: '取消',
-    onPositiveClick: () => runFirewallAction('/network/clear-all'),
-  })
-}
-
-const handleAllowCloudflare = () => runFirewallAction('/network/allow-cloudflare')
 
 const openAddModal = () => {
   addForm.value = { protocol: 'tcp', source: '0.0.0.0/0', ports: '', description: '', is_stateless: false }
@@ -385,10 +399,12 @@ watch(
   () => {
     resetTarget()
     loadVCNs()
+    loadInstances()
   },
 )
 
 onMounted(() => {
   loadVCNs()
+  loadInstances()
 })
 </script>

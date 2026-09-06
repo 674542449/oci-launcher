@@ -33,6 +33,8 @@ type InstanceItem struct {
 	FreeformTags map[string]string `json:"freeform_tags"`
 	RootPassword string            `json:"root_password,omitempty"`
 	SSHCommand   string            `json:"ssh_command"`
+	SubnetID     string            `json:"subnet_id"`
+	HasNSG       bool              `json:"has_nsg"` // a per-instance firewall (NSG) is attached
 }
 
 // primaryVnic returns the instance's primary VNIC (the one that carries the public IP).
@@ -174,6 +176,8 @@ comps:
 		// Terminating instances have no usable VNIC; skip the extra calls.
 		if inst.LifecycleState != core.InstanceLifecycleStateTerminating && inst.Id != nil {
 			if vnic, err := primaryVnic(ctx, computeClient, netClient, li.comp.ID, *inst.Id); err == nil {
+				item.SubnetID = StrVal(vnic.SubnetId)
+				item.HasNSG = len(vnic.NsgIds) > 0
 				item.PublicIP = StrVal(vnic.PublicIp)
 				item.PrivateIP = StrVal(vnic.PrivateIp)
 				if len(vnic.Ipv6Addresses) > 0 {

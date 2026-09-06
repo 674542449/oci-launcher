@@ -38,6 +38,12 @@
             <template #icon><n-icon><AddOutline /></n-icon></template>
             添加规则
           </n-button>
+          <n-dropdown trigger="click" :options="quickOptions" placement="bottom-end" @select="onQuick">
+            <n-button size="small" secondary :loading="quickBusy">
+              快捷操作
+              <template #icon><n-icon><ChevronDownOutline /></n-icon></template>
+            </n-button>
+          </n-dropdown>
           <n-button size="small" secondary type="error" :loading="removing" @click="confirmRemove">移除专属防火墙</n-button>
         </div>
       </div>
@@ -112,8 +118,9 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { NButton, NIcon, NSkeleton, NModal, NForm, NFormItem, NInput, NSelect, useMessage, useDialog } from 'naive-ui'
-import { AddOutline, ShieldCheckmarkOutline, WarningOutline } from '@vicons/ionicons5'
+import { NButton, NIcon, NSkeleton, NModal, NForm, NFormItem, NInput, NSelect, NDropdown, useMessage, useDialog } from 'naive-ui'
+import type { DropdownOption } from 'naive-ui'
+import { AddOutline, ShieldCheckmarkOutline, WarningOutline, ChevronDownOutline } from '@vicons/ionicons5'
 import { api } from '@/api/client'
 
 const props = defineProps<{
@@ -263,6 +270,48 @@ const confirmDelete = (r: any) => {
       }
     },
   })
+}
+
+// ---------- shortcuts (moved here from the subnet list) ----------
+const quickBusy = ref(false)
+const quickOptions: DropdownOption[] = [
+  { label: '放通 Cloudflare CDN 的 80 / 443', key: 'cf' },
+  { label: '放通全部端口与协议', key: 'all' },
+  { type: 'divider', key: 'd' },
+  { label: '清空所有规则', key: 'clear', props: { style: 'color: var(--c-danger)' } },
+]
+const runQuick = async (path: string) => {
+  quickBusy.value = true
+  try {
+    const res: any = await api.post(path, { profile_id: props.profileId, region: props.region, nsg_id: fw.value.nsg.id })
+    message.success(res.message || '已完成')
+    await load()
+  } catch (e: any) {
+    message.error(e.message)
+  } finally {
+    quickBusy.value = false
+  }
+}
+const onQuick = (key: string) => {
+  if (key === 'cf') {
+    runQuick('/instances/firewall/allow-cloudflare')
+  } else if (key === 'all') {
+    dialog.warning({
+      title: '放通全部端口与协议',
+      content: `将为 ${props.instance.display_name} 添加 0.0.0.0/0 与 ::/0 的全端口、全协议入站规则，它上面所有监听的服务都会暴露到公网。`,
+      positiveText: '放通全部',
+      negativeText: '取消',
+      onPositiveClick: () => runQuick('/instances/firewall/allow-all'),
+    })
+  } else if (key === 'clear') {
+    dialog.error({
+      title: '清空所有规则',
+      content: `清空后 ${props.instance.display_name} 只剩子网安全列表的规则；如果安全列表已是最小规则，外部将无法连接任何端口，包括 SSH。`,
+      positiveText: '清空',
+      negativeText: '取消',
+      onPositiveClick: () => runQuick('/instances/firewall/clear'),
+    })
+  }
 }
 
 const confirmRemove = () => {
