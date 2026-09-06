@@ -105,6 +105,12 @@ func SetupRouter() *gin.Engine {
 			protected.POST("/instances/attach-ipv6", AttachIPv6)
 			protected.POST("/instances/update-tags", UpdateInstanceTags)
 			protected.GET("/instances/metrics", InstanceMetrics)
+			// Per-instance firewall (NSG on the primary VNIC)
+			protected.GET("/instances/firewall", GetInstanceFirewall)
+			protected.POST("/instances/firewall/enable", EnableInstanceFirewall)
+			protected.POST("/instances/firewall/disable", DisableInstanceFirewall)
+			protected.POST("/instances/firewall/rules/add", AddInstanceFirewallRule)
+			protected.POST("/instances/firewall/rules/delete", DeleteInstanceFirewallRule)
 
 			// Storage
 			protected.GET("/storage/boot-volumes", ListBootVolumes)

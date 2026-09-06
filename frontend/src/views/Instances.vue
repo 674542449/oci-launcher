@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6、7 天利用率，以及保存在云端标签里的 Root 密码。">
+    <PageHeader title="实例" description="开关机、更换公网 IP、改配、附加 IPv6、7 天利用率、按实例的防火墙，以及保存在云端标签里的 Root 密码。">
       <template #actions>
         <n-button secondary :loading="loading" :disabled="!currentProfile" @click="fetchInstances">
           <template #icon><n-icon><RefreshOutline /></n-icon></template>
@@ -45,7 +45,7 @@
           <tbody>
             <tr v-for="inst in instances" :key="inst.ocid">
               <td>
-                <div class="flex max-w-[240px] flex-col">
+                <div class="flex max-w-[180px] flex-col">
                   <span class="truncate text-[14px] font-semibold text-ink" :title="inst.display_name">{{ inst.display_name }}</span>
                   <span class="mono mt-0.5 truncate text-xs text-ink-3" :title="`${inst.ocid}\n创建于 ${formatDate(inst.time_created)}`">
                     {{ shortAD(inst.ad) }} · {{ formatShortDate(inst.time_created) }}<template v-if="inst.compartment && inst.compartment !== 'root'"> · {{ inst.compartment }}</template>
@@ -64,13 +64,13 @@
                 </div>
                 <div v-else class="text-xs text-ink-3">无公网 IPv4</div>
                 <div v-if="inst.ipv6" class="mt-0.5 flex items-center gap-2">
-                  <span class="mono max-w-[170px] truncate text-xs text-ink-2" :title="inst.ipv6">{{ inst.ipv6 }}</span>
+                  <span class="mono max-w-[140px] truncate text-xs text-ink-2" :title="inst.ipv6">{{ inst.ipv6 }}</span>
                   <button type="button" class="txt-btn" @click="copyText(inst.ipv6, 'IPv6')">复制</button>
                 </div>
               </td>
               <td>
                 <div v-if="inst.root_password" class="flex items-center gap-2">
-                  <code class="mono rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{{ showPasswordMap[inst.ocid] ? inst.root_password : '••••••••••••' }}</code>
+                  <code class="mono rounded bg-surface-2 px-2 py-0.5 text-xs text-ink">{{ showPasswordMap[inst.ocid] ? inst.root_password : '••••••••' }}</code>
                   <button
                     type="button"
                     class="inline-flex h-7 w-7 items-center justify-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
@@ -79,17 +79,29 @@
                   >
                     <n-icon size="16"><component :is="showPasswordMap[inst.ocid] ? EyeOffOutline : EyeOutline" /></n-icon>
                   </button>
-                  <button type="button" class="txt-btn" @click="copyText(inst.root_password, 'Root 密码')">复制</button>
+                  <button
+                    type="button"
+                    class="inline-flex h-7 w-7 items-center justify-center rounded text-ink-3 transition-colors hover:bg-surface-2 hover:text-ink"
+                    aria-label="复制 Root 密码"
+                    title="复制"
+                    @click="copyText(inst.root_password, 'Root 密码')"
+                  >
+                    <n-icon size="15"><CopyOutline /></n-icon>
+                  </button>
                 </div>
                 <div v-else class="text-xs text-ink-3">密钥登录 / 未设置</div>
               </td>
               <td class="text-right">
-                <div class="inline-flex items-center gap-1.5">
+                <div class="inline-flex items-center gap-1">
                   <n-button v-if="inst.state === 'STOPPED'" size="small" type="success" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'START')">开机</n-button>
                   <n-button v-if="inst.state === 'RUNNING'" size="small" type="warning" secondary :loading="acting === inst.ocid" @click="handleAction(inst, 'STOP')">关机</n-button>
                   <n-button size="small" secondary @click="openMetrics(inst)">
                     <template #icon><n-icon><PulseOutline /></n-icon></template>
                     利用率
+                  </n-button>
+                  <n-button size="small" secondary @click="openFirewall(inst)">
+                    <template #icon><n-icon><ShieldCheckmarkOutline /></n-icon></template>
+                    防火墙
                   </n-button>
                   <n-dropdown trigger="click" :options="moreOptions(inst)" placement="bottom-end" @select="(key: string) => onMore(key, inst)">
                     <n-button size="small" secondary aria-label="更多操作">
@@ -103,6 +115,11 @@
         </table>
       </div>
     </div>
+
+    <!-- Per-instance firewall (NSG) -->
+    <n-modal v-model:show="showFirewallModal" preset="card" :title="`实例防火墙 · ${firewallInst?.display_name || ''}`" style="width: 92vw; max-width: 720px" :bordered="false">
+      <InstanceFirewall v-if="firewallInst && showFirewallModal" :profile-id="profileStore.activeProfileId as number" :region="currentProfile?.region || ''" :instance="firewallInst" />
+    </n-modal>
 
     <!-- 7-day utilization -->
     <n-modal v-model:show="showMetricsModal" preset="card" :title="`近 7 天利用率 · ${metricsInst?.display_name || ''}`" style="width: 92vw; max-width: 780px" :bordered="false">
@@ -267,6 +284,8 @@ import {
   WarningOutline,
   TerminalOutline,
   RadioOutline,
+  ShieldCheckmarkOutline,
+  CopyOutline,
 } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
@@ -274,6 +293,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'
 import Sparkline from '@/components/Sparkline.vue'
+import InstanceFirewall from '@/components/InstanceFirewall.vue'
 
 const profileStore = useProfileStore()
 const message = useMessage()
@@ -299,6 +319,13 @@ const showTerminateModal = ref(false)
 const terminateConfirmName = ref('')
 const terminating = ref(false)
 const terminateReady = computed(() => !!selectedInst.value && terminateConfirmName.value.trim() === selectedInst.value.display_name)
+
+const showFirewallModal = ref(false)
+const firewallInst = ref<any>(null)
+const openFirewall = (inst: any) => {
+  firewallInst.value = inst
+  showFirewallModal.value = true
+}
 
 const showMetricsModal = ref(false)
 const metricsInst = ref<any>(null)
