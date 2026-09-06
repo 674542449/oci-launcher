@@ -68,13 +68,18 @@ type LaunchTask struct {
 	CurrentRetries      int            `gorm:"default:0" json:"current_retries"`
 	LastAttemptAt       *time.Time     `json:"last_attempt_at"`
 	LastMessage         string         `gorm:"type:text" json:"last_message"`
-	SuccessInstanceOCID string         `gorm:"size:255" json:"success_instance_ocid"`
+	SuccessInstanceOCID string         `gorm:"size:255" json:"success_instance_ocid"` // DB column: ColSuccessInstanceOCID
 	SuccessPublicIP     string         `gorm:"size:64" json:"success_public_ip"`
 	SuccessIPv6         string         `gorm:"size:128" json:"success_ipv6"`
 	CreatedAt           time.Time      `json:"created_at"`
 	UpdatedAt           time.Time      `json:"updated_at"`
 	DeletedAt           gorm.DeletedAt `gorm:"index" json:"-"`
 }
+
+// ColSuccessInstanceOCID is the database column behind LaunchTask.SuccessInstanceOCID. GORM's
+// naming strategy splits "OCID" into "oc_id" (likewise image_oc_id, subnet_oc_id, tenancy_oc_id,
+// user_oc_id), so raw column names in Updates/Where must use this constant, not the JSON name.
+const ColSuccessInstanceOCID = "success_instance_oc_id"
 
 type TaskAttempt struct {
 	ID              uint64    `gorm:"primaryKey" json:"id"`

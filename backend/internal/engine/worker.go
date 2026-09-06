@@ -308,9 +308,9 @@ func SuccessFields(instanceOCID string, existed bool) map[string]interface{} {
 		msg = "云端已存在同名实例，视为创建成功"
 	}
 	return map[string]interface{}{
-		"status":                "success",
-		"success_instance_ocid": instanceOCID,
-		"last_message":          msg,
+		"status":                       "success",
+		storage.ColSuccessInstanceOCID: instanceOCID,
+		"last_message":                 msg,
 	}
 }
 
