@@ -556,6 +556,95 @@ func ListSecurityRules(ctx context.Context, profile *storage.OCIProfile, region,
 	return items, nil
 }
 
+// SecurityListView is what the firewall page shows: both directions plus whether the list
+// already is the minimal baseline (two ICMP rules in, everything out).
+type SecurityListView struct {
+	Ingress   []SecurityRuleItem `json:"ingress"`
+	Egress    []SecurityRuleItem `json:"egress"`
+	IsMinimal bool               `json:"is_minimal"`
+	VcnCIDR   string             `json:"vcn_cidr"`
+}
+
+// DescribeSecurityList reads a security list and reports both rule directions.
+func DescribeSecurityList(ctx context.Context, profile *storage.OCIProfile, region, secListID string) (*SecurityListView, error) {
+	netClient, err := GetVirtualNetworkClient(profile, region)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
+	if err != nil {
+		return nil, err
+	}
+	sl := resp.SecurityList
+
+	view := &SecurityListView{Ingress: []SecurityRuleItem{}, Egress: []SecurityRuleItem{}}
+	for _, rule := range sl.IngressSecurityRules {
+		view.Ingress = append(view.Ingress, SecurityRuleItem{
+			Key:         ruleKey(rule),
+			Protocol:    protocolName(StrVal(rule.Protocol)),
+			Source:      StrVal(rule.Source),
+			Description: StrVal(rule.Description),
+			PortRange:   describePorts(rule),
+			IsStateless: BoolVal(rule.IsStateless),
+		})
+	}
+	for _, rule := range sl.EgressSecurityRules {
+		shaped := core.IngressSecurityRule{Protocol: rule.Protocol, TcpOptions: rule.TcpOptions, UdpOptions: rule.UdpOptions, IcmpOptions: rule.IcmpOptions}
+		view.Egress = append(view.Egress, SecurityRuleItem{
+			Protocol:    protocolName(StrVal(rule.Protocol)),
+			Source:      StrVal(rule.Destination),
+			Description: StrVal(rule.Description),
+			PortRange:   describePorts(shaped),
+			IsStateless: BoolVal(rule.IsStateless),
+		})
+	}
+
+	if vcn, err := netClient.GetVcn(ctx, core.GetVcnRequest{VcnId: sl.VcnId}); err == nil {
+		view.VcnCIDR = StrVal(vcn.Vcn.CidrBlock)
+		if view.VcnCIDR == "" && len(vcn.Vcn.CidrBlocks) > 0 {
+			view.VcnCIDR = vcn.Vcn.CidrBlocks[0]
+		}
+	}
+	view.IsMinimal = isMinimalSecurityList(sl, view.VcnCIDR)
+	return view, nil
+}
+
+// isMinimalSecurityList tells whether the list is exactly the baseline ResetSecurityListToMinimal
+// writes: ingress ICMP 3/4 from 0.0.0.0/0 plus ICMP 3 from the VCN, egress allow-all only.
+func isMinimalSecurityList(sl core.SecurityList, vcnCIDR string) bool {
+	pmtud, internal := false, false
+	for _, r := range sl.IngressSecurityRules {
+		if StrVal(r.Protocol) != "1" || r.IcmpOptions == nil || r.IcmpOptions.Type == nil || *r.IcmpOptions.Type != 3 || BoolVal(r.IsStateless) {
+			return false
+		}
+		switch {
+		case StrVal(r.Source) == "0.0.0.0/0" && r.IcmpOptions.Code != nil && *r.IcmpOptions.Code == 4 && !pmtud:
+			pmtud = true
+		case vcnCIDR != "" && StrVal(r.Source) == vcnCIDR && r.IcmpOptions.Code == nil && !internal:
+			internal = true
+		default:
+			return false
+		}
+	}
+	if !pmtud || (vcnCIDR != "" && !internal) {
+		return false
+	}
+	v4 := false
+	for _, r := range sl.EgressSecurityRules {
+		if StrVal(r.Protocol) != "all" {
+			return false
+		}
+		switch StrVal(r.Destination) {
+		case "0.0.0.0/0":
+			v4 = true
+		case "::/0":
+		default:
+			return false
+		}
+	}
+	return v4
+}
+
 func protocolName(p string) string {
 	switch p {
 	case "6":

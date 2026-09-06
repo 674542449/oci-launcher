@@ -2,7 +2,8 @@
   <div>
     <PageHeader title="防火墙" description="子网安全列表（Security List）对子网里的每台实例生效，只作为最小底座；各实例的端口在「实例」页的专属防火墙里设置。">
       <template #actions>
-        <n-button secondary type="warning" :loading="operating" :disabled="!selectedSecListID" @click="handleResetMinimal">恢复为最小规则</n-button>
+        <span v-if="selectedSecListID && isMinimal" class="pill pill-ok">已是最小规则</span>
+        <n-button v-else-if="selectedSecListID" secondary type="warning" :loading="operating" @click="handleResetMinimal">恢复为最小规则</n-button>
         <n-button type="primary" :disabled="!selectedSecListID" @click="openAddModal">
           <template #icon><n-icon><AddOutline /></n-icon></template>
           添加规则
@@ -104,6 +105,39 @@
       </div>
     </div>
 
+    <!-- Egress: shown so the rule count adds up; the baseline keeps it at allow-all -->
+    <div v-if="selectedSecListID && !loading" class="card mt-4 overflow-hidden">
+      <div class="card-head card-pad pb-4">
+        <div>
+          <h2 class="section-title">出站规则</h2>
+          <p class="caption">Egress rules · 共 {{ egress.length }} 条 · 只读，最小规则下保持全部放行</p>
+        </div>
+      </div>
+      <EmptyState v-if="egress.length === 0" title="没有出站规则" description="实例将无法主动连接外部网络，建议至少保留一条全部放行。" />
+      <div v-else class="tbl-wrap border-t border-line">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>协议</th>
+              <th>目标</th>
+              <th>目标端口</th>
+              <th>说明</th>
+              <th>状态跟踪</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(r, i) in egress" :key="i">
+              <td><code class="mono rounded px-1.5 py-0.5 text-xs font-semibold" :class="protoClass(r.protocol)">{{ r.protocol }}</code></td>
+              <td class="mono text-[13px] font-medium text-ink">{{ r.source }}</td>
+              <td class="mono text-[13px] text-ink">{{ r.port_range || 'ALL' }}</td>
+              <td class="max-w-[280px] truncate text-ink-2" :title="r.description">{{ r.description || '—' }}</td>
+              <td class="text-xs text-ink-3">{{ r.is_stateless ? '无状态' : '有状态' }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <!-- Add rule -->
     <n-modal v-model:show="showAddModal" preset="card" title="添加入站规则" style="max-width: 520px" :bordered="false">
       <n-form label-placement="top" :show-feedback="false" @submit.prevent="submitAddRule">
@@ -165,6 +199,8 @@ const selectedSecListID = ref('')
 const vcnOptions = ref<any[]>([])
 const subnets = ref<any[]>([])
 const rules = ref<any[]>([])
+const egress = ref<any[]>([])
+const isMinimal = ref(false)
 
 const showAddModal = ref(false)
 const adding = ref(false)
@@ -272,6 +308,8 @@ const fetchRules = async () => {
   try {
     const res: any = await api.get(`/network/security-rules?profile_id=${profileStore.activeProfileId}&security_list_id=${selectedSecListID.value}`)
     rules.value = res.rules || []
+    egress.value = res.egress || []
+    isMinimal.value = !!res.is_minimal
   } catch (e: any) {
     message.error(e.message)
   } finally {

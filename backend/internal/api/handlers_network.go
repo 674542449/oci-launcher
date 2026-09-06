@@ -122,13 +122,13 @@ func ListSecurityRules(c *gin.Context) {
 		return
 	}
 
-	rules, err := oci.ListSecurityRules(c.Request.Context(), &profile, profile.Region, secListID)
+	view, err := oci.DescribeSecurityList(c.Request.Context(), &profile, profile.Region, secListID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取安全规则失败: " + err.Error()})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"rules": rules})
+	c.JSON(http.StatusOK, gin.H{"rules": view.Ingress, "egress": view.Egress, "is_minimal": view.IsMinimal, "vcn_cidr": view.VcnCIDR})
 }
 
 type AddSecurityRuleRequest struct {
