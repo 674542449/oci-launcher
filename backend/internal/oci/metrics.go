@@ -52,6 +52,10 @@ type InstanceMetrics struct {
 // GetInstanceMetrics reads 7 days of hourly compute-agent metrics for one instance and applies
 // Oracle's idle-reclaim rule to them. Network has no percentage metric, so the verdict rests on
 // CPU (95th percentile) and memory; network volume is reported for context.
+//
+// NetworksBytesIn/Out are cumulative counters (sampled every 10 s, reset when the OS restarts),
+// so they are read with increment(): the change per hour is the bytes moved in that hour. A
+// counter reset makes one interval negative, which is clamped to zero.
 func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region, instanceOCID string) (*InstanceMetrics, error) {
 	monClient, err := GetMonitoringClient(profile, region)
 	if err != nil {
@@ -86,7 +90,7 @@ func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region
 				if dp.Value == nil || dp.Timestamp == nil {
 					continue
 				}
-				pts = append(pts, MetricPoint{T: dp.Timestamp.UTC().Format(time.RFC3339), V: *dp.Value})
+				pts = append(pts, MetricPoint{T: dp.Timestamp.UTC().Format(time.RFC3339), V: math.Max(0, *dp.Value)})
 			}
 		}
 		sort.Slice(pts, func(i, j int) bool { return pts[i].T < pts[j].T })
@@ -102,8 +106,8 @@ func GetInstanceMetrics(ctx context.Context, profile *storage.OCIProfile, region
 	jobs := []*job{
 		{metric: "CpuUtilization", fn: "mean", out: &result.CPU},
 		{metric: "MemoryUtilization", fn: "mean", out: &result.Memory},
-		{metric: "NetworksBytesIn", fn: "sum", out: &result.NetIn},
-		{metric: "NetworksBytesOut", fn: "sum", out: &result.NetOut},
+		{metric: "NetworksBytesIn", fn: "increment", out: &result.NetIn},
+		{metric: "NetworksBytesOut", fn: "increment", out: &result.NetOut},
 	}
 	var wg sync.WaitGroup
 	for _, j := range jobs {
