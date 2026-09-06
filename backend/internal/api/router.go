@@ -94,6 +94,7 @@ func SetupRouter() *gin.Engine {
 			// Quota & Traffic
 			protected.GET("/quota", GetQuota)
 			protected.GET("/quota/traffic", GetTraffic)
+			protected.GET("/billing", GetBilling)
 
 			// Instances
 			protected.GET("/instances", ListInstances)

@@ -67,6 +67,7 @@ import {
   LayersOutline,
   ShieldCheckmarkOutline,
   PeopleOutline,
+  WalletOutline,
   SettingsOutline,
   LockClosedOutline,
   LogOutOutline,
@@ -91,6 +92,7 @@ const navItems = [
   { title: '存储', path: '/storage', icon: LayersOutline },
   { title: '防火墙', path: '/firewall', icon: ShieldCheckmarkOutline },
   { title: '账号', path: '/profiles', icon: PeopleOutline },
+  { title: '账单', path: '/billing', icon: WalletOutline },
   { title: '设置', path: '/settings', icon: SettingsOutline },
 ]
 

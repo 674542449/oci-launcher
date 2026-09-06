@@ -46,6 +46,12 @@ const router = createRouter({
       meta: { title: '账号' },
     },
     {
+      path: '/billing',
+      name: 'Billing',
+      component: () => import('./views/Billing.vue'),
+      meta: { title: '账单' },
+    },
+    {
       path: '/settings',
       name: 'Settings',
       component: () => import('./views/Settings.vue'),
