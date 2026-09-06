@@ -81,7 +81,7 @@
         <div class="card-head card-pad pb-4">
           <div>
             <h2 class="section-title">SSH 公钥</h2>
-            <p class="caption">保存常用公钥，创建实例时直接选择；默认公钥会自动填入。</p>
+            <p class="caption">保存常用公钥，创建实例时直接选择。默认公钥按账号设置（在创建实例页选中后点"设为该账号默认"）。</p>
           </div>
           <n-button size="small" secondary @click="showAddKey = !showAddKey">
             <template #icon><n-icon><AddOutline /></n-icon></template>
@@ -121,22 +121,20 @@
                 <th>名称</th>
                 <th>类型</th>
                 <th>指纹</th>
+                <th>默认账号</th>
                 <th>添加时间</th>
                 <th class="text-right">操作</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="k in sshKeys" :key="k.id">
-                <td>
-                  <span class="font-medium text-ink">{{ k.name }}</span>
-                  <span v-if="k.is_default" class="pill pill-info ml-2">默认</span>
-                </td>
+                <td><span class="font-medium text-ink">{{ k.name }}</span></td>
                 <td class="mono text-xs text-ink-2">{{ k.key_type }}</td>
                 <td class="mono max-w-[320px] truncate text-xs text-ink-2" :title="k.fingerprint">{{ k.fingerprint }}</td>
+                <td class="max-w-[220px] truncate text-xs text-ink-2" :title="(k.default_for || []).join('、')">{{ (k.default_for || []).length ? k.default_for.join('、') : '—' }}</td>
                 <td class="mono text-xs text-ink-3">{{ formatTime(k.created_at) }}</td>
                 <td class="text-right">
                   <div class="inline-flex items-center gap-1.5">
-                    <n-button v-if="!k.is_default" size="small" secondary @click="setDefaultKey(k)">设为默认</n-button>
                     <n-button size="small" secondary @click="copyKey(k)">复制</n-button>
                     <n-button size="small" secondary type="error" :loading="deletingKey === k.id" @click="removeKey(k)">删除</n-button>
                   </div>
@@ -334,16 +332,6 @@ const removeKey = (k: any) => {
       }
     },
   })
-}
-
-const setDefaultKey = async (k: any) => {
-  try {
-    await api.post(`/ssh-keys/default/${k.id}`)
-    message.success(`「${k.name}」已设为默认公钥`)
-    await fetchSSHKeys()
-  } catch (e: any) {
-    message.error(e.message)
-  }
 }
 
 const copyKey = async (k: any) => {

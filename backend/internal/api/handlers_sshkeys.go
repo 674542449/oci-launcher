@@ -15,12 +15,19 @@ import (
 )
 
 // Saved SSH public keys: pasted once in Settings, picked from a list when creating instances.
+// A default key is chosen per account (never globally), so nothing nudges the same key into
+// every tenancy.
 
 var sshKeyTypeRe = regexp.MustCompile(`^(ssh-ed25519|ssh-rsa|ssh-dss|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)$`)
 
 type sshKeyRequest struct {
 	Name      string `json:"name" binding:"required,max=64"`
 	PublicKey string `json:"public_key" binding:"required"`
+}
+
+type sshKeyView struct {
+	storage.SSHKey
+	DefaultFor []string `json:"default_for"` // names of the accounts that use this key by default
 }
 
 // parseSSHPublicKey validates an OpenSSH public key line and returns its type, SHA256
@@ -49,14 +56,32 @@ func parseSSHPublicKey(raw string) (keyType, fingerprint, comment string, err er
 	return fields[0], fingerprint, comment, nil
 }
 
-// ListSSHKeys returns the saved public keys, default first.
-func ListSSHKeys(c *gin.Context) {
-	var keys []storage.SSHKey
-	storage.DB.Order("is_default DESC, created_at ASC").Find(&keys)
-	c.JSON(http.StatusOK, gin.H{"keys": keys})
+func sshKeyViews(keys []storage.SSHKey) []sshKeyView {
+	var profiles []storage.OCIProfile
+	storage.DB.Where("default_ssh_key_id > 0").Order("id ASC").Find(&profiles)
+	byKey := map[uint][]string{}
+	for _, p := range profiles {
+		byKey[p.DefaultSSHKeyID] = append(byKey[p.DefaultSSHKeyID], p.Name)
+	}
+	views := make([]sshKeyView, 0, len(keys))
+	for _, k := range keys {
+		names := byKey[k.ID]
+		if names == nil {
+			names = []string{}
+		}
+		views = append(views, sshKeyView{SSHKey: k, DefaultFor: names})
+	}
+	return views
 }
 
-// CreateSSHKey stores one public key; the first key saved becomes the default.
+// ListSSHKeys returns the saved public keys with the accounts each one is the default for.
+func ListSSHKeys(c *gin.Context) {
+	var keys []storage.SSHKey
+	storage.DB.Order("created_at ASC").Find(&keys)
+	c.JSON(http.StatusOK, gin.H{"keys": sshKeyViews(keys)})
+}
+
+// CreateSSHKey stores one public key.
 func CreateSSHKey(c *gin.Context) {
 	var req sshKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -75,15 +100,12 @@ func CreateSSHKey(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "这把公钥已经保存过（指纹相同）"})
 		return
 	}
-	var total int64
-	storage.DB.Model(&storage.SSHKey{}).Count(&total)
 
 	key := storage.SSHKey{
 		Name:        strings.TrimSpace(req.Name),
 		KeyType:     keyType,
 		PublicKey:   strings.TrimSpace(req.PublicKey),
 		Fingerprint: fingerprint,
-		IsDefault:   total == 0,
 		CreatedAt:   time.Now(),
 	}
 	if err := storage.DB.Create(&key).Error; err != nil {
@@ -91,10 +113,10 @@ func CreateSSHKey(c *gin.Context) {
 		return
 	}
 	storage.LogAudit("ADD_SSH_KEY", "admin", c.ClientIP(), c.GetHeader("User-Agent"), key.Name+" "+fingerprint, "SUCCESS")
-	c.JSON(http.StatusOK, gin.H{"message": "公钥已保存", "key": key})
+	c.JSON(http.StatusOK, gin.H{"message": "公钥已保存", "key": sshKeyView{SSHKey: key, DefaultFor: []string{}}})
 }
 
-// DeleteSSHKey removes a saved key; if it was the default, the oldest remaining key takes over.
+// DeleteSSHKey removes a saved key and clears it as any account's default.
 func DeleteSSHKey(c *gin.Context) {
 	id, ok := parseID(c.Param("id"))
 	if !ok {
@@ -107,21 +129,21 @@ func DeleteSSHKey(c *gin.Context) {
 		return
 	}
 	storage.DB.Delete(&key)
-	if key.IsDefault {
-		var next storage.SSHKey
-		if err := storage.DB.Order("created_at ASC").First(&next).Error; err == nil {
-			storage.DB.Model(&next).Update("is_default", true)
-		}
-	}
+	storage.DB.Model(&storage.OCIProfile{}).Where("default_ssh_key_id = ?", key.ID).Update("default_ssh_key_id", 0)
 	storage.LogAudit("DELETE_SSH_KEY", "admin", c.ClientIP(), c.GetHeader("User-Agent"), key.Name+" "+key.Fingerprint, "SUCCESS")
 	c.JSON(http.StatusOK, gin.H{"message": "公钥已删除"})
 }
 
-// SetDefaultSSHKey marks one key as the default pre-selected when creating instances.
+// SetDefaultSSHKey makes a key the default for one account (?profile_id=). It reports the
+// other accounts already using the key, so reuse across tenancies is a conscious choice.
 func SetDefaultSSHKey(c *gin.Context) {
 	id, ok := parseID(c.Param("id"))
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "无效的公钥 ID"})
+		return
+	}
+	profile, ok := profileFromQuery(c)
+	if !ok {
 		return
 	}
 	var key storage.SSHKey
@@ -129,7 +151,18 @@ func SetDefaultSSHKey(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "公钥不存在"})
 		return
 	}
-	storage.DB.Model(&storage.SSHKey{}).Where("is_default = ?", true).Update("is_default", false)
-	storage.DB.Model(&key).Update("is_default", true)
-	c.JSON(http.StatusOK, gin.H{"message": "已设为默认公钥"})
+
+	var others []storage.OCIProfile
+	storage.DB.Where("default_ssh_key_id = ? AND id <> ?", key.ID, profile.ID).Find(&others)
+	names := make([]string, 0, len(others))
+	for _, o := range others {
+		names = append(names, o.Name)
+	}
+
+	storage.DB.Model(&profile).Update("default_ssh_key_id", key.ID)
+	msg := "已设为「" + profile.Name + "」的默认公钥"
+	if len(names) > 0 {
+		msg += "。注意：这把公钥也是 " + strings.Join(names, "、") + " 的默认公钥，多个账号共用同一把公钥会被关联"
+	}
+	c.JSON(http.StatusOK, gin.H{"message": msg, "shared_with": names})
 }

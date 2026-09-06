@@ -189,7 +189,7 @@
       <div class="space-y-4">
         <div>
           <span class="label">名称</span>
-          <n-input v-model:value="newBlockForm.name" placeholder="如 data-vol-1" />
+          <n-input v-model:value="newBlockForm.name" placeholder="如 volume-20260906-1659" />
         </div>
         <div>
           <span class="label">可用区</span>
@@ -219,7 +219,7 @@
       <div class="space-y-4">
         <div>
           <span class="label">存储桶名称</span>
-          <n-input v-model:value="newBucketName" placeholder="如 static-assets" :input-props="{ spellcheck: 'false' }" />
+          <n-input v-model:value="newBucketName" placeholder="如 bucket-20260906-1659" :input-props="{ spellcheck: 'false' }" />
           <p class="caption mt-1">同一命名空间内名称必须唯一，只允许字母、数字、连字符和下划线。</p>
         </div>
         <div class="flex justify-end gap-2 pt-1">
@@ -237,6 +237,7 @@ import { NButton, NIcon, NTabs, NTabPane, NModal, NInput, NInputNumber, NSlider,
 import { RefreshOutline, AddOutline, CubeOutline } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
+import { defaultName } from '@/lib/naming'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'
@@ -262,7 +263,7 @@ const backupName = ref('')
 const backingUp = ref(false)
 
 const showCreateBlockModal = ref(false)
-const newBlockForm = ref({ name: 'data-vol-1', ad: '', size: 50, vpu: 10 })
+const newBlockForm = ref({ name: defaultName('volume'), ad: '', size: 50, vpu: 10 })
 const creatingBlock = ref(false)
 
 const showCreateBucketModal = ref(false)
@@ -387,8 +388,7 @@ const submitResizeBV = async () => {
 
 const openBackupModal = (bv: any) => {
   selectedBV.value = bv
-  const stamp = new Date().toISOString().slice(0, 10)
-  backupName.value = `${bv.display_name}-backup-${stamp}`.replace(/\s+/g, '-')
+  backupName.value = defaultName('bootvolumebackup')
   showBackupModal.value = true
 }
 

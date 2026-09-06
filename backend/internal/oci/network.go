@@ -352,28 +352,32 @@ func waitForVcnAvailable(ctx context.Context, netClient core.VirtualNetworkClien
 }
 
 func tcpRule(source, desc string, port int) core.IngressSecurityRule {
-	return core.IngressSecurityRule{
-		Protocol:    common.String("6"),
-		Source:      common.String(source),
-		SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-		Description: common.String(desc),
+	rule := core.IngressSecurityRule{
+		Protocol:   common.String("6"),
+		Source:     common.String(source),
+		SourceType: core.IngressSecurityRuleSourceTypeCidrBlock,
 		TcpOptions: &core.TcpOptions{
 			DestinationPortRange: &core.PortRange{Min: common.Int(port), Max: common.Int(port)},
 		},
 	}
+	if desc != "" {
+		rule.Description = common.String(desc)
+	}
+	return rule
 }
 
-// CreateRecommendedVCN creates an IPv6-enabled VCN, an Internet Gateway, default routes,
-// a sane default security list (22/80/443, ping, PMTUD, all IPv6) and one public subnet.
-// Non-fatal problems (e.g. IPv6 not available in the region) are returned as warnings.
+// CreateRecommendedVCN creates what the console's "Create VCN" flow creates: an IPv6-enabled
+// VCN, an Internet Gateway, default routes and one public subnet, with the default security
+// list left as OCI creates it (SSH 22 and ICMP). Extra ports and inbound IPv6 are opened
+// from the firewall page. Non-fatal problems (e.g. no IPv6 in the region) come back as warnings.
 func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, region string) (vcnID, subnetID string, warnings []string, err error) {
 	netClient, err := GetVirtualNetworkClient(profile, region)
 	if err != nil {
 		return "", "", nil, err
 	}
 
-	// Names follow the OCI console's own convention (vcn-YYYYMMDD-HHMM and friends)
-	stamp := time.Now().Format("20060102-1504")
+	// Names and DNS labels follow the OCI console's own convention (vcn-YYYYMMDD-HHMM and friends)
+	stamp := NameStamp()
 	vcnName := "vcn-" + stamp
 	igwName := "Internet gateway-" + vcnName
 	subnetName := "public subnet-" + vcnName
@@ -383,6 +387,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		CreateVcnDetails: core.CreateVcnDetails{
 			CompartmentId:                common.String(profile.TenancyOCID),
 			DisplayName:                  common.String(vcnName),
+			DnsLabel:                     common.String(DNSLabel("vcn", stamp)),
 			CidrBlock:                    common.String("10.0.0.0/16"),
 			IsIpv6Enabled:                common.Bool(true),
 			IsOracleGuaAllocationEnabled: common.Bool(true),
@@ -395,6 +400,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 			CreateVcnDetails: core.CreateVcnDetails{
 				CompartmentId: common.String(profile.TenancyOCID),
 				DisplayName:   common.String(vcnName),
+				DnsLabel:      common.String(DNSLabel("vcn", stamp)),
 				CidrBlock:     common.String("10.0.0.0/16"),
 			},
 		})
@@ -438,13 +444,11 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		Destination:     common.String("0.0.0.0/0"),
 		DestinationType: core.RouteRuleDestinationTypeCidrBlock,
 		NetworkEntityId: common.String(igwID),
-		Description:     common.String("Default IPv4 internet route"),
 	}
 	ipv6Route := core.RouteRule{
 		Destination:     common.String("::/0"),
 		DestinationType: core.RouteRuleDestinationTypeCidrBlock,
 		NetworkEntityId: common.String(igwID),
-		Description:     common.String("Default IPv6 internet route"),
 	}
 	updateRoutes := func(rules []core.RouteRule) error {
 		_, err := netClient.UpdateRouteTable(ctx, core.UpdateRouteTableRequest{
@@ -464,65 +468,12 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		return vcnID, "", warnings, fmt.Errorf("failed to set default route to Internet Gateway: %w", err)
 	}
 
-	// 4. Default security list
-	ingress := []core.IngressSecurityRule{
-		tcpRule("0.0.0.0/0", "Allow SSH", 22),
-		tcpRule("0.0.0.0/0", "Allow HTTP", 80),
-		tcpRule("0.0.0.0/0", "Allow HTTPS", 443),
-		{
-			Protocol:    common.String("1"),
-			Source:      common.String("0.0.0.0/0"),
-			SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-			Description: common.String("Allow ICMP echo (ping)"),
-			IcmpOptions: &core.IcmpOptions{Type: common.Int(8)},
-		},
-		{
-			Protocol:    common.String("1"),
-			Source:      common.String("0.0.0.0/0"),
-			SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-			Description: common.String("ICMP path MTU discovery"),
-			IcmpOptions: &core.IcmpOptions{Type: common.Int(3), Code: common.Int(4)},
-		},
-	}
-	ipv6Ingress := core.IngressSecurityRule{
-		Protocol:    common.String("all"),
-		Source:      common.String("::/0"),
-		SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-		Description: common.String("Allow all IPv6 inbound"),
-	}
-	egress := []core.EgressSecurityRule{
-		{
-			Protocol:        common.String("all"),
-			Destination:     common.String("0.0.0.0/0"),
-			DestinationType: core.EgressSecurityRuleDestinationTypeCidrBlock,
-			Description:     common.String("Allow all IPv4 outbound"),
-		},
-	}
-	ipv6Egress := core.EgressSecurityRule{
-		Protocol:        common.String("all"),
-		Destination:     common.String("::/0"),
-		DestinationType: core.EgressSecurityRuleDestinationTypeCidrBlock,
-		Description:     common.String("Allow all IPv6 outbound"),
-	}
-	updateSecList := func(in []core.IngressSecurityRule, out []core.EgressSecurityRule) error {
-		_, err := netClient.UpdateSecurityList(ctx, core.UpdateSecurityListRequest{
-			SecurityListId: vcn.DefaultSecurityListId,
-			UpdateSecurityListDetails: core.UpdateSecurityListDetails{
-				IngressSecurityRules: in,
-				EgressSecurityRules:  out,
-			},
-		})
-		return err
-	}
+	// 4. Default security list: keep the rules OCI created (SSH 22 and ICMP, like the console);
+	//    a dual-stack subnet only needs the IPv6 egress rule added.
 	if ipv6Prefix != "" {
-		if err := updateSecList(append(append([]core.IngressSecurityRule{}, ingress...), ipv6Ingress), append(append([]core.EgressSecurityRule{}, egress...), ipv6Egress)); err != nil {
-			warnings = append(warnings, "IPv6 安全规则添加失败: "+err.Error())
-			if err := updateSecList(ingress, egress); err != nil {
-				return vcnID, "", warnings, fmt.Errorf("failed to update default security list: %w", err)
-			}
+		if err := ensureIPv6Egress(ctx, netClient, StrVal(vcn.DefaultSecurityListId)); err != nil {
+			warnings = append(warnings, "IPv6 出站规则添加失败: "+err.Error())
 		}
-	} else if err := updateSecList(ingress, egress); err != nil {
-		return vcnID, "", warnings, fmt.Errorf("failed to update default security list: %w", err)
 	}
 
 	// 5. Public subnet (dual-stack when the VCN has an IPv6 prefix)
@@ -530,6 +481,7 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		CompartmentId:   common.String(profile.TenancyOCID),
 		VcnId:           common.String(vcnID),
 		DisplayName:     common.String(subnetName),
+		DnsLabel:        common.String(DNSLabel("subnet", stamp)),
 		CidrBlock:       common.String("10.0.0.0/24"),
 		RouteTableId:    vcn.DefaultRouteTableId,
 		SecurityListIds: []string{StrVal(vcn.DefaultSecurityListId)},
@@ -551,6 +503,30 @@ func CreateRecommendedVCN(ctx context.Context, profile *storage.OCIProfile, regi
 		log.Printf("[Network] CreateRecommendedVCN warning (%s): %s", vcnID, w)
 	}
 	return vcnID, *subResp.Subnet.Id, warnings, nil
+}
+
+// ensureIPv6Egress adds an allow-all ::/0 egress rule to a security list unless one exists.
+func ensureIPv6Egress(ctx context.Context, netClient core.VirtualNetworkClient, secListID string) error {
+	resp, err := netClient.GetSecurityList(ctx, core.GetSecurityListRequest{SecurityListId: common.String(secListID)})
+	if err != nil {
+		return err
+	}
+	for _, r := range resp.SecurityList.EgressSecurityRules {
+		if StrVal(r.Destination) == "::/0" && StrVal(r.Protocol) == "all" {
+			return nil
+		}
+	}
+	egress := append([]core.EgressSecurityRule{}, resp.SecurityList.EgressSecurityRules...)
+	egress = append(egress, core.EgressSecurityRule{
+		Protocol:        common.String("all"),
+		Destination:     common.String("::/0"),
+		DestinationType: core.EgressSecurityRuleDestinationTypeCidrBlock,
+	})
+	_, err = netClient.UpdateSecurityList(ctx, core.UpdateSecurityListRequest{
+		SecurityListId:            common.String(secListID),
+		UpdateSecurityListDetails: core.UpdateSecurityListDetails{EgressSecurityRules: egress},
+	})
+	return err
 }
 
 // ListSecurityRules lists ingress security rules of a security list
@@ -703,16 +679,14 @@ func applyIngressRules(ctx context.Context, profile *storage.OCIProfile, region,
 func AllowAllFirewallRules(ctx context.Context, profile *storage.OCIProfile, region, secListID string) error {
 	wanted := []core.IngressSecurityRule{
 		{
-			Protocol:    common.String("all"),
-			Source:      common.String("0.0.0.0/0"),
-			SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-			Description: common.String("Allow All IPv4 (One-Click Allow-All)"),
+			Protocol:   common.String("all"),
+			Source:     common.String("0.0.0.0/0"),
+			SourceType: core.IngressSecurityRuleSourceTypeCidrBlock,
 		},
 		{
-			Protocol:    common.String("all"),
-			Source:      common.String("::/0"),
-			SourceType:  core.IngressSecurityRuleSourceTypeCidrBlock,
-			Description: common.String("Allow All IPv6 (One-Click Allow-All)"),
+			Protocol:   common.String("all"),
+			Source:     common.String("::/0"),
+			SourceType: core.IngressSecurityRuleSourceTypeCidrBlock,
 		},
 	}
 	_, err := applyIngressRules(ctx, profile, region, secListID, wanted)

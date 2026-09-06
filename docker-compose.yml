@@ -60,6 +60,12 @@ services:
       - PAYG_A1_MEMORY_GB=${PAYG_A1_MEMORY_GB:-24}
       - FREE_STORAGE_GB=${FREE_STORAGE_GB:-200}
       - FREE_MICRO_COUNT=${FREE_MICRO_COUNT:-2}
+      - TZ=${TZ:-Asia/Tokyo}
+      - NAME_TIMEZONE=${NAME_TIMEZONE:-Asia/Tokyo}
+      - RETRY_MAX_DAYS=${RETRY_MAX_DAYS:-7}
+      - RETRY_MAX_LAUNCHES_PER_DAY=${RETRY_MAX_LAUNCHES_PER_DAY:-30}
+      - CAPACITY_POLL_MIN_SECS=${CAPACITY_POLL_MIN_SECS:-180}
+      - CAPACITY_POLL_MAX_SECS=${CAPACITY_POLL_MAX_SECS:-300}
     volumes:
       - ~/.oci:/root/.oci:ro
       - app_data:/app/data

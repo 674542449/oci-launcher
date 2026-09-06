@@ -117,14 +117,25 @@ func RandomRetryWait() time.Duration {
 	return time.Duration(retryWaitMinSecs+rand.Intn(retryWaitMaxSecs-retryWaitMinSecs+1)) * time.Second
 }
 
-var (
-	nameAdjectives = []string{"amber", "brisk", "calm", "coral", "crisp", "dusk", "ember", "fern", "frost", "gale", "glen", "hazel", "ivory", "jade", "lunar", "maple", "misty", "nova", "ocean", "onyx", "opal", "pearl", "pine", "quiet", "river", "sage", "slate", "solar", "storm", "swift", "terra", "tidal", "vivid", "willow", "zephyr"}
-	nameNouns      = []string{"atlas", "beacon", "cedar", "comet", "delta", "falcon", "harbor", "heron", "iris", "kestrel", "lantern", "lotus", "meadow", "nimbus", "orbit", "osprey", "pixel", "quartz", "ridge", "sparrow", "summit", "tundra", "vector", "vertex", "voyager", "willet", "zenith"}
-)
+// DefaultInstanceName follows the OCI console's default: instance-YYYYMMDD-HHMM.
+func DefaultInstanceName() string {
+	return oci.DefaultName("instance")
+}
 
-// RandomInstanceName produces a project-style name such as "amber-falcon-42".
-func RandomInstanceName() string {
-	return fmt.Sprintf("%s-%s-%02d", nameAdjectives[rand.Intn(len(nameAdjectives))], nameNouns[rand.Intn(len(nameNouns))], rand.Intn(100))
+// CapacityPollWait is the pause between two capacity checks of a queued task
+// (CAPACITY_POLL_MIN_SECS..CAPACITY_POLL_MAX_SECS, uniformly random).
+func CapacityPollWait() time.Duration {
+	lo, hi := 180, 300
+	if cfg := config.GlobalConfig; cfg != nil {
+		lo, hi = cfg.CapacityPollMinSecs, cfg.CapacityPollMaxSecs
+	}
+	if lo < 30 {
+		lo = 30
+	}
+	if hi < lo {
+		hi = lo
+	}
+	return time.Duration(lo+rand.Intn(hi-lo+1)) * time.Second
 }
 
 // sleepCtx waits for d unless the context is cancelled first (returns false in that case).
@@ -360,8 +371,11 @@ func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *sto
 	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword)
 }
 
-// RunTaskWorker is the queued retry loop: it keeps attempting LaunchInstance, rotating through
-// the availability domains, until it succeeds, hits a fatal error or is stopped.
+// RunTaskWorker is the queued creation loop. It does not hammer LaunchInstance: every few
+// minutes it reads the Compute Capacity Report (a read-only call) and only launches when
+// Oracle reports room for the shape in one of the availability domains. Tenancies that cannot
+// use the report fall back to spaced direct attempts. Both modes stop after RETRY_MAX_DAYS,
+// respect RETRY_MAX_LAUNCHES_PER_DAY and the task's own max-retries.
 func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 	log.Printf("[Engine] Starting worker for task: %s", taskID)
 
@@ -400,8 +414,20 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 	}
 
 	rootPassword := DecryptTaskRootPassword(task.RootPasswordEnc)
-	currentADIndex := 0
+	cfg := config.GlobalConfig
+	var deadline time.Time
+	if cfg.RetryMaxDays > 0 {
+		deadline = task.CreatedAt.Add(time.Duration(cfg.RetryMaxDays) * 24 * time.Hour)
+	}
+	reportUsable := true // flips off when this tenancy cannot use the capacity report
 	backoffFactor := 1
+	launches := 0
+	launchesToday, dayKey := 0, ""
+	adIdx := 0
+
+	setMessage := func(msg string) {
+		storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Update("last_message", msg)
+	}
 
 	for {
 		if ctx.Err() != nil {
@@ -419,9 +445,15 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 			setTaskStatus(taskID, "failed", "关联的 OCI 账号已被删除，任务停止")
 			return
 		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			msg := fmt.Sprintf("排队已持续 %d 天，按上限自动停止；需要时可重新排队", cfg.RetryMaxDays)
+			setTaskStatus(taskID, "stopped", msg)
+			emitLog(taskID.String(), currentTask.CurrentRetries, task.Region, "", "STOPPED", msg, 0)
+			return
+		}
 
 		// One OCI account operated at a time: take (or refresh) the global lock
-		if ok, lockedBy, err := cache.AcquireAccountLock(ctx, profile.ID, time.Duration(retryWaitMaxSecs*2)*time.Second); err != nil {
+		if ok, lockedBy, err := cache.AcquireAccountLock(ctx, profile.ID, 2*CapacityPollWait()+time.Minute); err != nil {
 			log.Printf("[Engine] Task %s: account lock error: %v", taskID, err)
 		} else if !ok {
 			wait := RandomRetryWait()
@@ -433,11 +465,69 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 			continue
 		}
 
-		targetAD := adList[currentADIndex%len(adList)]
-		currentADIndex++
-		attemptNum := currentTask.CurrentRetries + 1
+		round := currentTask.CurrentRetries + 1
+		if today := time.Now().Format("2006-01-02"); today != dayKey {
+			dayKey, launchesToday = today, 0
+		}
 
-		res := AttemptLaunch(ctx, &profile, &currentTask, targetAD, attemptNum, rootPassword)
+		// 1. Where to try: the capacity report decides; without it, rotate through the ADs.
+		targetAD := ""
+		if reportUsable {
+			reports, err := oci.CheckCapacityAcrossADs(ctx, &profile, task.Region, adList, task.Shape, task.OCPU, task.MemoryInGBs)
+			switch {
+			case err != nil && ctx.Err() != nil:
+				return
+			case err != nil && oci.IsCapacityReportUnavailable(err):
+				reportUsable = false
+				emitLog(taskID.String(), round, task.Region, "", "WAIT", "该租户无法使用容量报告（"+err.Error()+"），改为按间隔直接尝试创建", 0)
+			case err != nil:
+				wait := CapacityPollWait()
+				setMessage(fmt.Sprintf("容量报告查询失败：%s，%d 秒后重试", err.Error(), int(wait.Seconds())))
+				if !sleepCtx(ctx, wait) {
+					return
+				}
+				continue
+			default:
+				now := time.Now()
+				storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Updates(map[string]interface{}{
+					"current_retries": round,
+					"last_attempt_at": &now,
+				})
+				summary := oci.SummarizeCapacity(reports)
+				available := oci.AvailableADs(reports)
+				if len(available) == 0 {
+					wait := CapacityPollWait()
+					setMessage(fmt.Sprintf("第 %d 次容量检查：%s。%d 秒后再查", round, summary, int(wait.Seconds())))
+					emitLog(taskID.String(), round, task.Region, "", "WAIT", fmt.Sprintf("容量检查：%s，%d 秒后再查", summary, int(wait.Seconds())), 0)
+					if !sleepCtx(ctx, wait) {
+						return
+					}
+					continue
+				}
+				targetAD = available[adIdx%len(available)]
+				adIdx++
+				emitLog(taskID.String(), round, task.Region, targetAD, "RETRY", fmt.Sprintf("容量检查：%s，尝试在 %s 创建", summary, shortAD(targetAD)), 0)
+			}
+		}
+		if targetAD == "" {
+			targetAD = adList[adIdx%len(adList)]
+			adIdx++
+		}
+
+		// 2. Daily cap on real LaunchInstance calls
+		if cfg.RetryMaxLaunchesPerDay > 0 && launchesToday >= cfg.RetryMaxLaunchesPerDay {
+			wait := CapacityPollWait()
+			setMessage(fmt.Sprintf("今日已发起 %d 次创建，达到每日上限，%d 秒后继续检查容量", launchesToday, int(wait.Seconds())))
+			if !sleepCtx(ctx, wait) {
+				return
+			}
+			continue
+		}
+
+		// 3. One real attempt
+		res := AttemptLaunch(ctx, &profile, &currentTask, targetAD, round, rootPassword)
+		launches++
+		launchesToday++
 		if res.Category == CategoryCancelled && !res.Success {
 			return
 		}
@@ -445,7 +535,7 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 		if res.Success {
 			// The OCID is the success criterion; addresses and the notification follow.
 			storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Updates(SuccessFields(res.InstanceOCID, res.AlreadyExisted))
-			FinalizeSuccess(ctx, &profile, &currentTask, res, attemptNum, rootPassword)
+			FinalizeSuccess(ctx, &profile, &currentTask, res, round, rootPassword)
 			return
 		}
 
@@ -460,22 +550,21 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 			if backoffFactor > maxBackoffFactor {
 				backoffFactor = maxBackoffFactor
 			}
-			wait = RandomRetryWait() * time.Duration(backoffFactor)
+			wait = CapacityPollWait() * time.Duration(backoffFactor)
 		default:
 			backoffFactor = 1
-			wait = RandomRetryWait()
+			wait = CapacityPollWait()
 		}
 
-		// Attempt budget is checked before sleeping so the last attempt does not waste an interval
-		if currentTask.MaxRetries > 0 && attemptNum >= currentTask.MaxRetries {
+		// The task's own budget counts real creation attempts, not capacity checks
+		if currentTask.MaxRetries > 0 && launches >= currentTask.MaxRetries {
 			setTaskStatus(taskID, "stopped", "已达到最大尝试次数限制，任务自动停止")
-			emitLog(taskID.String(), attemptNum, task.Region, targetAD, "STOPPED", "已达到设定的最大重试次数，任务停止", res.DurationMs)
+			emitLog(taskID.String(), round, task.Region, targetAD, "STOPPED", "已达到设定的最大重试次数，任务停止", res.DurationMs)
 			return
 		}
 
-		storage.DB.Model(&storage.LaunchTask{}).Where("id = ?", taskID).Update("last_message",
-			fmt.Sprintf("%s，%d 秒后重试（第 %d 次）", res.Reason, int(wait.Seconds()), attemptNum))
-		emitLog(taskID.String(), attemptNum, task.Region, targetAD, "WAIT", fmt.Sprintf("%d 秒后进行第 %d 次尝试", int(wait.Seconds()), attemptNum+1), 0)
+		setMessage(fmt.Sprintf("%s，%d 秒后继续（已尝试创建 %d 次）", res.Reason, int(wait.Seconds()), launches))
+		emitLog(taskID.String(), round, task.Region, targetAD, "WAIT", fmt.Sprintf("%d 秒后继续", int(wait.Seconds())), 0)
 		if !sleepCtx(ctx, wait) {
 			return
 		}

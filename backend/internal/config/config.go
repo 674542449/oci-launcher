@@ -26,6 +26,16 @@ type Config struct {
 	PaygA1MemoryGB float64
 	FreeStorageGB  int64
 	FreeMicroCount int
+
+	// Console-style names (instance-YYYYMMDD-HHMM …) are stamped in this IANA zone.
+	NameTimezone string
+	// Queued creation: stop after RetryMaxDays (0 = never) and never issue more than
+	// RetryMaxLaunchesPerDay real LaunchInstance calls per task and day (0 = unlimited).
+	// Between capacity checks the worker sleeps a random CapacityPollMinSecs..MaxSecs.
+	RetryMaxDays           int
+	RetryMaxLaunchesPerDay int
+	CapacityPollMinSecs    int
+	CapacityPollMaxSecs    int
 }
 
 var GlobalConfig *Config
@@ -64,6 +74,12 @@ func LoadConfig() *Config {
 		PaygA1MemoryGB: getEnvFloat("PAYG_A1_MEMORY_GB", 24),
 		FreeStorageGB:  int64(getEnvInt("FREE_STORAGE_GB", 200)),
 		FreeMicroCount: getEnvInt("FREE_MICRO_COUNT", 2),
+
+		NameTimezone:           getEnv("NAME_TIMEZONE", "Asia/Tokyo"),
+		RetryMaxDays:           getEnvIntAllowZero("RETRY_MAX_DAYS", 7),
+		RetryMaxLaunchesPerDay: getEnvIntAllowZero("RETRY_MAX_LAUNCHES_PER_DAY", 30),
+		CapacityPollMinSecs:    getEnvInt("CAPACITY_POLL_MIN_SECS", 180),
+		CapacityPollMaxSecs:    getEnvInt("CAPACITY_POLL_MAX_SECS", 300),
 	}
 
 	GlobalConfig = cfg
@@ -80,6 +96,16 @@ func getEnv(key, defaultVal string) string {
 func getEnvInt(key string, defaultVal int) int {
 	if val := os.Getenv(key); val != "" {
 		if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultVal
+}
+
+// getEnvIntAllowZero is getEnvInt where an explicit 0 is a valid value ("unlimited").
+func getEnvIntAllowZero(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if n, err := strconv.Atoi(strings.TrimSpace(val)); err == nil && n >= 0 {
 			return n
 		}
 	}

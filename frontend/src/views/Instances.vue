@@ -203,8 +203,8 @@
     <!-- Tags -->
     <n-modal v-model:show="showEditTagsModal" preset="card" title="编辑 Root 密码标签" style="max-width: 460px" :bordered="false">
       <div v-if="selectedInst" class="space-y-4">
-        <p class="caption">写入实例的云端自由标签 <code class="mono">root_password</code>。留空则删除该标签。这不会修改系统里的真实密码。</p>
-        <n-form-item label="root_password" label-placement="top" :show-feedback="false">
+        <p class="caption">写入实例的云端自由标签 <code class="mono">password</code>。留空则删除该标签。这不会修改系统里的真实密码。</p>
+        <n-form-item label="password" label-placement="top" :show-feedback="false">
           <n-input v-model:value="editRootPass" class="mono" placeholder="留空则删除" :input-props="{ autocomplete: 'off', spellcheck: 'false' }" />
         </n-form-item>
         <div class="flex justify-end gap-2 pt-1">
@@ -561,8 +561,9 @@ const submitUpdateTags = async () => {
   updatingTags.value = true
   try {
     const tags = { ...(selectedInst.value.freeform_tags || {}) }
-    if (editRootPass.value) tags['root_password'] = editRootPass.value
-    else delete tags['root_password']
+    delete tags['root_password'] // key used by older versions
+    if (editRootPass.value) tags['password'] = editRootPass.value
+    else delete tags['password']
     await api.post('/instances/update-tags', {
       profile_id: profileStore.activeProfileId,
       region: currentProfile.value?.region,

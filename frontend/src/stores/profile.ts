@@ -22,6 +22,7 @@ export interface OCIProfile {
   tags: string
   notes: string
   is_active: boolean
+  default_ssh_key_id?: number
 }
 
 export const useProfileStore = defineStore('profile', () => {

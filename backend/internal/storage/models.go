@@ -39,6 +39,7 @@ type OCIProfile struct {
 	Tags                string     `gorm:"type:text" json:"tags"`  // comma-separated tags e.g. "Main,PAYG,Tokyo"
 	Notes               string     `gorm:"type:text" json:"notes"` // personal remarks/email
 	IsActive            bool       `gorm:"default:true" json:"is_active"`
+	DefaultSSHKeyID     uint       `gorm:"default:0" json:"default_ssh_key_id"` // saved SSH key pre-filled for this account
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }

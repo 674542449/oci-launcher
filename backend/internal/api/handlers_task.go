@@ -141,7 +141,7 @@ func CreateTask(c *gin.Context) {
 	}
 	instanceName := strings.TrimSpace(req.InstanceName)
 	if instanceName == "" {
-		instanceName = engine.RandomInstanceName()
+		instanceName = engine.DefaultInstanceName()
 	}
 
 	// One OCI account at a time
@@ -250,6 +250,26 @@ func CreateTask(c *gin.Context) {
 			"result": "failed", "retryable": false, "reason": msg, "task_id": task.ID.String(), "task": task,
 		})
 		return
+	}
+
+	// Ask the capacity report first: launch only where Oracle reports room, so a full region
+	// costs one read-only call per AD instead of failed LaunchInstance calls. When the report
+	// is not usable in this tenancy the attempts go ahead directly.
+	if reports, err := oci.CheckCapacityAcrossADs(ctx, &profile, task.Region, adNames, task.Shape, task.OCPU, task.MemoryInGBs); err == nil {
+		if available := oci.AvailableADs(reports); len(available) > 0 {
+			adNames = available
+		} else {
+			releaseLock()
+			finalized = true
+			msg := "容量报告显示当前没有可用容量：" + oci.SummarizeCapacity(reports)
+			updateTask(task.ID, map[string]interface{}{"status": "stopped", "last_message": msg + "（未排队）"})
+			task.Status, task.LastMessage = "stopped", msg+"（未排队）"
+			c.JSON(http.StatusOK, gin.H{
+				"result": "failed", "retryable": true, "reason": msg, "attempts": 0,
+				"task_id": task.ID.String(), "task": task,
+			})
+			return
+		}
 	}
 
 	rootPassword := req.RootPassword
@@ -428,7 +448,7 @@ func ListPresets(c *gin.Context) {
 
 	presets := []preset{{
 		ID: 1, Name: "AMD 微型机 1C / 1G", Shape: "VM.Standard.E2.1.Micro",
-		OCPU: 1, MemoryInGBs: 1, BootVolumeSizeInGBs: 50, BootVolumeVPU: 120, LoginMode: "root_key", EnableIPv6: true,
+		OCPU: 1, MemoryInGBs: 1, BootVolumeSizeInGBs: 50, BootVolumeVPU: 10, LoginMode: "root_key", EnableIPv6: true,
 	}}
 	id := 2
 	for cores := ocpu; cores >= 1; cores /= 2 {
@@ -441,7 +461,7 @@ func ListPresets(c *gin.Context) {
 		}
 		presets = append(presets, preset{
 			ID: id, Name: name, Shape: "VM.Standard.A1.Flex",
-			OCPU: cores, MemoryInGBs: memGB, BootVolumeSizeInGBs: boot, BootVolumeVPU: 120, LoginMode: "root_key", EnableIPv6: true,
+			OCPU: cores, MemoryInGBs: memGB, BootVolumeSizeInGBs: boot, BootVolumeVPU: 10, LoginMode: "root_key", EnableIPv6: true,
 			IsMax: cores == ocpu,
 		})
 		id++

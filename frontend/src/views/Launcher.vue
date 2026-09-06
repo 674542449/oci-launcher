@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队，系统每 60–180 秒随机重试一次，直到创建成功。" />
+    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队，系统每 3–5 分钟查询一次官方容量报告，报告有容量才真正创建，最长持续 7 天。" />
 
     <!-- No VCN yet -->
     <div v-if="!loadingNets && netsLoaded && vcnOptions.length === 0" class="notice notice-warn mb-6 items-center">
@@ -25,7 +25,7 @@
           <span>
             <b class="mono">{{ t.instance_name }}</b>
             {{ taskStripLabel(t) }}
-            <span v-if="t.status === 'running'" class="mono">· 第 {{ t.current_retries }} 次</span>
+            <span v-if="t.status === 'running'" class="mono">· 已检查 {{ t.current_retries }} 次</span>
             <span v-if="t.status === 'running' && t.last_message" class="ml-1 text-ink-2">· {{ t.last_message }}</span>
           </span>
           <n-button size="small" secondary :type="t.status === 'running' ? 'warning' : 'default'" :loading="taskActing === t.id" @click="stopTask(t)">
@@ -74,7 +74,7 @@
               <n-form-item label="实例名称">
                 <n-input v-model:value="form.instance_name" placeholder="留空则自动生成" :input-props="{ spellcheck: 'false' }" class="mono">
                   <template #suffix>
-                    <button type="button" class="txt-btn-muted" title="换一个随机名称" @click="form.instance_name = randomInstanceName()">换一个</button>
+                    <button type="button" class="txt-btn-muted" title="重新生成名称" @click="form.instance_name = randomInstanceName()">换一个</button>
                   </template>
                 </n-input>
               </n-form-item>
@@ -147,7 +147,7 @@
             </div>
             <div class="flex flex-wrap gap-x-6 gap-y-2">
               <n-checkbox v-model:checked="form.assign_public_ip">分配公网 IPv4</n-checkbox>
-              <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 并放通防火墙</n-checkbox>
+              <n-checkbox v-model:checked="form.enable_ipv6">分配 IPv6 地址</n-checkbox>
             </div>
           </fieldset>
 
@@ -171,6 +171,8 @@
                   class="w-full sm:w-[340px]"
                   @update:value="applySavedKey"
                 />
+                <n-button v-if="selectedKeyId && selectedKeyId !== currentProfile?.default_ssh_key_id" size="small" secondary @click="setAccountDefaultKey">设为该账号默认</n-button>
+                <span v-else-if="selectedKeyId" class="caption">该账号默认</span>
                 <router-link to="/settings" class="txt-btn-muted">管理公钥</router-link>
               </div>
               <n-input
@@ -259,6 +261,7 @@ import { GlobeOutline, RefreshOutline, CopyOutline, RocketOutline, CloudUploadOu
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
 import { regionLabel } from '@/lib/regions'
+import { defaultName } from '@/lib/naming'
 import PageHeader from '@/components/PageHeader.vue'
 
 const profileStore = useProfileStore()
@@ -290,10 +293,7 @@ let pollTimer: number | null = null
 
 
 // Project-style random names: adjective-noun-NN
-const ADJECTIVES = ['amber', 'brisk', 'calm', 'coral', 'crisp', 'dusk', 'ember', 'fern', 'frost', 'gale', 'glen', 'hazel', 'ivory', 'jade', 'lunar', 'maple', 'misty', 'nova', 'ocean', 'onyx', 'opal', 'pearl', 'pine', 'quiet', 'river', 'sage', 'slate', 'solar', 'storm', 'swift', 'terra', 'tidal', 'vivid', 'willow', 'zephyr']
-const NOUNS = ['atlas', 'beacon', 'cedar', 'comet', 'delta', 'falcon', 'harbor', 'heron', 'iris', 'kestrel', 'lantern', 'lotus', 'meadow', 'nimbus', 'orbit', 'osprey', 'pixel', 'quartz', 'ridge', 'sparrow', 'summit', 'tundra', 'vector', 'vertex', 'voyager', 'zenith']
-const pick = (arr: string[]) => arr[Math.floor(Math.random() * arr.length)]
-const randomInstanceName = () => `${pick(ADJECTIVES)}-${pick(NOUNS)}-${String(Math.floor(Math.random() * 100)).padStart(2, '0')}`
+const randomInstanceName = () => defaultName('instance')
 
 const form = ref({
   instance_name: randomInstanceName(),
@@ -301,7 +301,7 @@ const form = ref({
   ocpu: 2,
   memory_in_gbs: 12,
   boot_volume_size_in_gbs: 50,
-  boot_volume_vpu: 120,
+  boot_volume_vpu: 10,
   region: '',
   ad_list: [] as string[],
   image_ocid: '',
@@ -321,14 +321,21 @@ const sshKeyOptions = computed(() =>
 )
 const currentKeySaved = computed(() => sshKeys.value.some((k) => (k.public_key || '').trim() === form.value.ssh_authorized_keys.trim()))
 
+// The default key is chosen per account. When the account changes, a key that came from the
+// library is swapped for the new account's default (or cleared), never carried over silently.
 const loadSSHKeys = async () => {
   try {
     const res: any = await api.get('/ssh-keys')
     sshKeys.value = res.keys || []
-    const def = sshKeys.value.find((k) => k.is_default)
-    if (def && !form.value.ssh_authorized_keys.trim()) {
+    const current = form.value.ssh_authorized_keys.trim()
+    const fromLibrary = !!current && sshKeys.value.some((k) => (k.public_key || '').trim() === current)
+    const def = sshKeys.value.find((k) => k.id === currentProfile.value?.default_ssh_key_id)
+    if (def && (!current || fromLibrary)) {
       form.value.ssh_authorized_keys = def.public_key
       selectedKeyId.value = def.id
+    } else if (!def && fromLibrary) {
+      form.value.ssh_authorized_keys = ''
+      selectedKeyId.value = null
     }
   } catch {
     /* the key library is optional */
@@ -340,6 +347,20 @@ const applySavedKey = (id: number | null) => {
   if (!k) return
   form.value.ssh_authorized_keys = k.public_key
   keyFileName.value = ''
+  const others = (k.default_for || []).filter((n: string) => n !== currentProfile.value?.name)
+  if (others.length) message.warning(`这把公钥也是 ${others.join('、')} 的默认公钥，多个账号共用同一把公钥会被关联`)
+}
+
+const setAccountDefaultKey = async () => {
+  if (!selectedKeyId.value || !profileStore.activeProfileId) return
+  try {
+    const res: any = await api.post(`/ssh-keys/default/${selectedKeyId.value}?profile_id=${profileStore.activeProfileId}`)
+    if (res.shared_with?.length) message.warning(res.message)
+    else message.success(res.message || '已设为该账号默认公钥')
+    await Promise.all([profileStore.fetchProfiles(), loadSSHKeys()])
+  } catch (e: any) {
+    message.error(e.message)
+  }
 }
 
 // Editing the textarea by hand detaches it from the selected saved key.
@@ -383,10 +404,10 @@ const shapeOptions = [
 ]
 
 const vpuOptions = [
-  { label: '120 VPU · 超高性能', value: 120 },
-  { label: '60 VPU · 超高性能', value: 60 },
+  { label: '10 VPU · 均衡（控制台默认）', value: 10 },
   { label: '20 VPU · 高性能', value: 20 },
-  { label: '10 VPU · 均衡（引导卷最低档）', value: 10 },
+  { label: '60 VPU · 超高性能', value: 60 },
+  { label: '120 VPU · 超高性能', value: 120 },
 ]
 
 const currentProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
@@ -395,7 +416,7 @@ const isA1 = computed(() => form.value.shape.includes('A1'))
 // as soon as LaunchInstance returns an instance OCID.
 const isActiveTask = (t: any) => t.status === 'running' || t.status === 'creating'
 const activeTasks = computed(() => tasks.value.filter(isActiveTask))
-const taskStripLabel = (t: any) => (t.status === 'creating' ? '正在创建…' : '排队重试中')
+const taskStripLabel = (t: any) => (t.status === 'creating' ? '正在创建…' : '排队中，等待容量')
 
 // The active task (queued retries, or a create in flight elsewhere) whose final outcome gets
 // announced on this page. Cleared once announced or when the user stops/clears it.
@@ -502,7 +523,7 @@ const applyPreset = (preset: any) => {
   form.value.ocpu = preset.ocpu
   form.value.memory_in_gbs = preset.memory_in_gbs
   form.value.boot_volume_size_in_gbs = preset.boot_volume_size_in_gbs
-  form.value.boot_volume_vpu = preset.boot_volume_vpu || 120
+  form.value.boot_volume_vpu = preset.boot_volume_vpu || 10
   form.value.enable_ipv6 = preset.enable_ipv6
   if (preset.login_mode) form.value.login_mode = preset.login_mode
   form.value.image_ocid = ''
@@ -662,7 +683,7 @@ const stopTask = async (t: any) => {
 const askAutoRetry = (res: any) => {
   dialog.warning({
     title: '创建失败，是否自动重试？',
-    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后系统每 60–180 秒随机重试一次，直到创建成功或你手动停止。`,
+    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后系统每 3–5 分钟查询一次官方容量报告，报告有容量才真正创建，直到成功、达到 7 天上限或你手动停止。`,
     positiveText: '自动重试',
     negativeText: '不重试',
     onPositiveClick: async () => {
@@ -811,7 +832,7 @@ const loadForProfile = async () => {
   form.value.image_ocid = ''
   form.value.ad_list = []
   netsLoaded.value = false
-  await Promise.all([loadPresets(), loadImages(), loadNetworks(), loadADs(), fetchTasks()])
+  await Promise.all([loadPresets(), loadImages(), loadNetworks(), loadADs(), fetchTasks(), loadSSHKeys()])
 }
 
 watch(
@@ -823,7 +844,7 @@ watch(
 
 onMounted(async () => {
   generateRandomPassword()
-  await Promise.all([loadForProfile(), loadSSHKeys()])
+  await loadForProfile()
   startPolling()
 })
 

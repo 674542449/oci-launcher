@@ -164,7 +164,9 @@ comps:
 			item.TimeCreated = inst.TimeCreated.Format(time.RFC3339)
 		}
 		if inst.FreeformTags != nil {
-			if pass, ok := inst.FreeformTags["root_password"]; ok {
+			if pass, ok := inst.FreeformTags["password"]; ok {
+				item.RootPassword = pass
+			} else if pass, ok := inst.FreeformTags["root_password"]; ok { // instances created by older versions
 				item.RootPassword = pass
 			}
 		}
@@ -195,58 +197,39 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// BuildCloudInitUserData generates the base64 cloud-init user_data script.
-//
-// Ubuntu 22.04/24.04 cloud images ship /etc/ssh/sshd_config.d/60-cloudimg-settings.conf with
-// "PasswordAuthentication no", and sshd honours the FIRST occurrence of a keyword. Appending to
-// that file therefore has no effect; a lexically earlier drop-in (00-*) is the reliable way.
+// BuildCloudInitUserData renders the instance's user data as a standard #cloud-config
+// document, using only cloud-init's own directives: disable_root so the platform SSH key
+// also works for root, chpasswd/ssh_pwauth for password logins, write_files/runcmd for the
+// sshd root setting, the in-guest firewall and BBR. Nothing in it names this tool.
 func BuildCloudInitUserData(loginMode, sshKey, rootPassword string, enableBBR bool) string {
-	var script strings.Builder
-	script.WriteString("#!/bin/bash\n")
-	script.WriteString("exec >>/var/log/oci_init.log 2>&1\n")
-	script.WriteString("echo '=== Initializing OCI Instance ==='\n")
+	var b strings.Builder
+	b.WriteString("#cloud-config\n")
+	b.WriteString("disable_root: false\n")
 
-	// 1. Flush the in-guest firewalls (OCI images ship iptables/ip6tables rules that reject everything but SSH)
-	script.WriteString("for fw in iptables ip6tables; do\n")
-	script.WriteString("  $fw -P INPUT ACCEPT || true; $fw -P FORWARD ACCEPT || true; $fw -P OUTPUT ACCEPT || true\n")
-	script.WriteString("  $fw -F || true; $fw -X || true\n")
-	script.WriteString("done\n")
-	script.WriteString("netfilter-persistent save || true\n")
-	script.WriteString("ufw disable || true\n")
-	script.WriteString("systemctl stop firewalld || true\n")
-	script.WriteString("systemctl disable firewalld || true\n")
-
-	// 2. SSH configuration
-	script.WriteString("mkdir -p /root/.ssh && chmod 700 /root/.ssh\n")
-	script.WriteString("mkdir -p /etc/ssh/sshd_config.d\n")
-
-	if loginMode == "root_password" && rootPassword != "" {
-		script.WriteString("printf '%s\\n' " + shellSingleQuote("root:"+rootPassword) + " | chpasswd\n")
-		script.WriteString("cat > /etc/ssh/sshd_config.d/00-oci-panel.conf <<'EOF'\n")
-		script.WriteString("PermitRootLogin yes\nPasswordAuthentication yes\nKbdInteractiveAuthentication yes\n")
-		script.WriteString("EOF\n")
-		// Older images without an Include line
-		script.WriteString("sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config\n")
-		script.WriteString("sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config\n")
-	} else if sshKey != "" {
-		script.WriteString("printf '%s\\n' " + shellSingleQuote(strings.TrimSpace(sshKey)) + " >> /root/.ssh/authorized_keys\n")
-		script.WriteString("chmod 600 /root/.ssh/authorized_keys\n")
-		script.WriteString("cat > /etc/ssh/sshd_config.d/00-oci-panel.conf <<'EOF'\n")
-		script.WriteString("PermitRootLogin prohibit-password\n")
-		script.WriteString("EOF\n")
-		script.WriteString("sed -i 's/^#*PermitRootLogin.*/PermitRootLogin prohibit-password/' /etc/ssh/sshd_config\n")
+	passwordMode := loginMode == "root_password" && rootPassword != ""
+	if passwordMode {
+		b.WriteString("ssh_pwauth: true\n")
+		b.WriteString("chpasswd:\n  expire: false\n  users:\n    - name: root\n      password: " + yamlQuote(rootPassword) + "\n      type: text\n")
+		b.WriteString("write_files:\n  - path: /etc/ssh/sshd_config.d/permit-root.conf\n    content: |\n      PermitRootLogin yes\n      PasswordAuthentication yes\n")
 	}
-	// Ubuntu's default authorized_keys for root carries a "no-port-forwarding ... command=..." prefix that blocks root logins
-	script.WriteString("sed -i 's/^no-port-forwarding.*sleep 10\" //' /root/.ssh/authorized_keys 2>/dev/null || true\n")
-	script.WriteString("systemctl restart ssh || systemctl restart sshd || true\n")
+	_ = sshKey // delivered through the instance metadata; disable_root:false applies it to root
 
-	// 3. BBR
+	b.WriteString("runcmd:\n")
+	// OCI images ship in-guest iptables rules that reject everything but SSH; the security list is the firewall.
+	b.WriteString("  - [ sh, -c, \"for fw in iptables ip6tables; do $fw -P INPUT ACCEPT; $fw -P FORWARD ACCEPT; $fw -P OUTPUT ACCEPT; $fw -F; $fw -X; done; netfilter-persistent save || true; ufw disable || true; systemctl disable --now firewalld || true\" ]\n")
 	if enableBBR {
-		script.WriteString("grep -q 'tcp_congestion_control=bbr' /etc/sysctl.conf || printf '%s\\n' 'net.core.default_qdisc=fq' 'net.ipv4.tcp_congestion_control=bbr' >> /etc/sysctl.conf\n")
-		script.WriteString("sysctl -p || true\n")
+		b.WriteString("  - [ sh, -c, \"printf 'net.core.default_qdisc=fq\\nnet.ipv4.tcp_congestion_control=bbr\\n' > /etc/sysctl.d/99-bbr.conf; sysctl --system || true\" ]\n")
+	}
+	if passwordMode {
+		b.WriteString("  - [ sh, -c, \"systemctl restart ssh || systemctl restart sshd || true\" ]\n")
 	}
 
-	return base64.StdEncoding.EncodeToString([]byte(script.String()))
+	return base64.StdEncoding.EncodeToString([]byte(b.String()))
+}
+
+// yamlQuote renders s as a double-quoted YAML scalar.
+func yamlQuote(s string) string {
+	return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(s) + "\""
 }
 
 // normalizeVPU snaps a requested VPU/GB value to what the API accepts: 10, 20, 30…120.
@@ -273,17 +256,17 @@ func LaunchInstance(ctx context.Context, profile *storage.OCIProfile, task *stor
 		return "", err
 	}
 
-	// Only the root password tag (a documented feature of this panel); no tool fingerprint.
+	// Password logins keep the password in a plain "password" tag, the way people tag it by hand.
 	tags := map[string]string{}
 	if task.LoginMode == "root_password" && task.RootPasswordEnc != "" {
-		tags["root_password"] = task.RootPasswordEnc
+		tags["password"] = task.RootPasswordEnc
 	}
 
 	userDataB64 := BuildCloudInitUserData(task.LoginMode, task.SSHAuthorizedKeys, task.RootPasswordEnc, true)
 
 	vpu := normalizeVPU(task.BootVolumeVPU, false)
 	if task.BootVolumeVPU <= 0 {
-		vpu = 120 // legacy default of this panel
+		vpu = 10 // console default (Balanced)
 	}
 	bootSize := task.BootVolumeSizeInGBs
 	if bootSize < 50 {
@@ -539,7 +522,6 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 			CompartmentId: common.String(profile.TenancyOCID),
 			Lifetime:      core.CreatePublicIpDetailsLifetimeEphemeral,
 			PrivateIpId:   privIPID,
-			DisplayName:   common.String(StrVal(vnic.DisplayName) + "-public-ip"),
 		},
 	})
 	if err != nil {
