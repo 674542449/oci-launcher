@@ -1,6 +1,6 @@
 <template>
   <div>
-    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队，系统每 3–5 分钟查询一次官方容量报告，报告有容量才真正创建，最长持续 7 天。" />
+    <PageHeader title="创建实例" description="填写规格后立即创建。容量不足时可以加入排队：ARM A1 每 3–5 分钟查询一次官方容量报告，有容量才真正创建；AMD 微型机按同样间隔直接尝试。最长持续 7 天。" />
 
     <!-- No VCN yet -->
     <div v-if="!loadingNets && netsLoaded && vcnOptions.length === 0" class="notice notice-warn mb-6 items-center">
@@ -683,7 +683,7 @@ const stopTask = async (t: any) => {
 const askAutoRetry = (res: any) => {
   dialog.warning({
     title: '创建失败，是否自动重试？',
-    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后系统每 3–5 分钟查询一次官方容量报告，报告有容量才真正创建，直到成功、达到 7 天上限或你手动停止。`,
+    content: `${res.reason || '容量不足'}。已尝试 ${res.attempts || 1} 个可用区。加入排队后，ARM A1 每 3–5 分钟查询一次官方容量报告，有容量才真正创建；AMD 微型机按同样间隔直接尝试。直到成功、达到 7 天上限或你手动停止。`,
     positiveText: '自动重试',
     negativeText: '不重试',
     onPositiveClick: async () => {

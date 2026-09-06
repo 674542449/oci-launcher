@@ -371,11 +371,12 @@ func FinalizeSuccess(ctx context.Context, profile *storage.OCIProfile, task *sto
 	notify.NotifyTaskSuccess(task, profile, pubIP, ipv6, rootPassword)
 }
 
-// RunTaskWorker is the queued creation loop. It does not hammer LaunchInstance: every few
-// minutes it reads the Compute Capacity Report (a read-only call) and only launches when
-// Oracle reports room for the shape in one of the availability domains. Tenancies that cannot
-// use the report fall back to spaced direct attempts. Both modes stop after RETRY_MAX_DAYS,
-// respect RETRY_MAX_LAUNCHES_PER_DAY and the task's own max-retries.
+// RunTaskWorker is the queued creation loop. For the ARM A1 shape it does not hammer
+// LaunchInstance: every few minutes it reads the Compute Capacity Report (a read-only call)
+// and only launches when Oracle reports room in one of the availability domains. The AMD
+// E2.1.Micro shape, and tenancies that cannot use the report, get spaced direct attempts.
+// Both modes stop after RETRY_MAX_DAYS, respect RETRY_MAX_LAUNCHES_PER_DAY and the task's
+// own max-retries.
 func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 	log.Printf("[Engine] Starting worker for task: %s", taskID)
 
@@ -419,7 +420,8 @@ func RunTaskWorker(ctx context.Context, taskID uuid.UUID) {
 	if cfg.RetryMaxDays > 0 {
 		deadline = task.CreatedAt.Add(time.Duration(cfg.RetryMaxDays) * 24 * time.Hour)
 	}
-	reportUsable := true // flips off when this tenancy cannot use the capacity report
+	// The capacity report only answers for the ARM A1 shape; E2.1.Micro is created directly.
+	reportUsable := oci.SupportsCapacityReport(task.Shape)
 	backoffFactor := 1
 	launches := 0
 	launchesToday, dayKey := 0, ""

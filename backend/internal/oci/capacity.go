@@ -17,6 +17,12 @@ const (
 	CapacityNotSupported = "HARDWARE_NOT_SUPPORTED"
 )
 
+// SupportsCapacityReport tells whether the report is meaningful for a shape. It is for the
+// Always Free ARM shape (VM.Standard.A1.Flex); the AMD E2.1.Micro is created directly.
+func SupportsCapacityReport(shape string) bool {
+	return strings.Contains(shape, "A1.Flex")
+}
+
 // ADCapacity is the capacity report answer for one availability domain.
 type ADCapacity struct {
 	AD        string `json:"ad"`

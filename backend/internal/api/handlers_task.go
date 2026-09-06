@@ -255,7 +255,9 @@ func CreateTask(c *gin.Context) {
 	// Ask the capacity report first: launch only where Oracle reports room, so a full region
 	// costs one read-only call per AD instead of failed LaunchInstance calls. When the report
 	// is not usable in this tenancy the attempts go ahead directly.
-	if reports, err := oci.CheckCapacityAcrossADs(ctx, &profile, task.Region, adNames, task.Shape, task.OCPU, task.MemoryInGBs); err == nil {
+	if !oci.SupportsCapacityReport(task.Shape) {
+		// E2.1.Micro: the report does not apply, create directly
+	} else if reports, err := oci.CheckCapacityAcrossADs(ctx, &profile, task.Region, adNames, task.Shape, task.OCPU, task.MemoryInGBs); err == nil {
 		if available := oci.AvailableADs(reports); len(available) > 0 {
 			adNames = available
 		} else {
