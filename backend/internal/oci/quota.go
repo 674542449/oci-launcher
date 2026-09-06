@@ -327,44 +327,53 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 		mu.Unlock()
 	}
 
+	// Always Free usage is tenancy-wide: count resources in every compartment.
+	compartments := ListCompartments(ctx, profile)
+
 	// Instances
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		req := core.ListInstancesRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-			Limit:         common.Int(100),
-		}
 		var localOCPU, localMem float64
 		var localMicro int
-		for {
-			resp, err := computeClient.ListInstances(ctx, req)
-			if err != nil {
-				fail(fmt.Errorf("list instances: %w", err))
-				return
+	comps:
+		for _, comp := range compartments {
+			req := core.ListInstancesRequest{
+				CompartmentId: common.String(comp.ID),
+				Limit:         common.Int(100),
 			}
-			for _, inst := range resp.Items {
-				if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
-					continue
-				}
-				shape := StrVal(inst.Shape)
-				if strings.Contains(shape, "A1.Flex") {
-					if inst.ShapeConfig != nil {
-						if inst.ShapeConfig.Ocpus != nil {
-							localOCPU += float64(*inst.ShapeConfig.Ocpus)
-						}
-						if inst.ShapeConfig.MemoryInGBs != nil {
-							localMem += float64(*inst.ShapeConfig.MemoryInGBs)
-						}
+			for {
+				resp, err := computeClient.ListInstances(ctx, req)
+				if err != nil {
+					if skipUnreadableCompartment(comp, profile, err) {
+						continue comps
 					}
-				} else if strings.Contains(shape, "E2.1.Micro") {
-					localMicro++
+					fail(fmt.Errorf("list instances: %w", err))
+					return
 				}
+				for _, inst := range resp.Items {
+					if inst.LifecycleState == core.InstanceLifecycleStateTerminated || inst.LifecycleState == core.InstanceLifecycleStateTerminating {
+						continue
+					}
+					shape := StrVal(inst.Shape)
+					if strings.Contains(shape, "A1.Flex") {
+						if inst.ShapeConfig != nil {
+							if inst.ShapeConfig.Ocpus != nil {
+								localOCPU += float64(*inst.ShapeConfig.Ocpus)
+							}
+							if inst.ShapeConfig.MemoryInGBs != nil {
+								localMem += float64(*inst.ShapeConfig.MemoryInGBs)
+							}
+						}
+					} else if strings.Contains(shape, "E2.1.Micro") {
+						localMicro++
+					}
+				}
+				if resp.OpcNextPage == nil {
+					break
+				}
+				req.Page = resp.OpcNextPage
 			}
-			if resp.OpcNextPage == nil {
-				break
-			}
-			req.Page = resp.OpcNextPage
 		}
 		mu.Lock()
 		usedA1OCPU, usedA1Mem, microCount = localOCPU, localMem, localMicro
@@ -376,49 +385,58 @@ func GetLiveQuotaSummary(ctx context.Context, profile *storage.OCIProfile) (*Quo
 	go func() {
 		defer wg.Done()
 		var localStorage int64
-		for _, ad := range adNames {
-			bvReq := core.ListBootVolumesRequest{
-				AvailabilityDomain: common.String(ad),
-				CompartmentId:      common.String(profile.TenancyOCID),
-				Limit:              common.Int(100),
+	comps:
+		for _, comp := range compartments {
+			for _, ad := range adNames {
+				bvReq := core.ListBootVolumesRequest{
+					AvailabilityDomain: common.String(ad),
+					CompartmentId:      common.String(comp.ID),
+					Limit:              common.Int(100),
+				}
+				for {
+					bvResp, err := blockClient.ListBootVolumes(ctx, bvReq)
+					if err != nil {
+						if skipUnreadableCompartment(comp, profile, err) {
+							continue comps
+						}
+						fail(fmt.Errorf("list boot volumes in %s: %w", ad, err))
+						return
+					}
+					for _, bv := range bvResp.Items {
+						if bv.LifecycleState != core.BootVolumeLifecycleStateTerminated && bv.LifecycleState != core.BootVolumeLifecycleStateTerminating {
+							localStorage += Int64Val(bv.SizeInGBs)
+						}
+					}
+					if bvResp.OpcNextPage == nil {
+						break
+					}
+					bvReq.Page = bvResp.OpcNextPage
+				}
+			}
+
+			volReq := core.ListVolumesRequest{
+				CompartmentId: common.String(comp.ID),
+				Limit:         common.Int(100),
 			}
 			for {
-				bvResp, err := blockClient.ListBootVolumes(ctx, bvReq)
+				volResp, err := blockClient.ListVolumes(ctx, volReq)
 				if err != nil {
-					fail(fmt.Errorf("list boot volumes in %s: %w", ad, err))
+					if skipUnreadableCompartment(comp, profile, err) {
+						continue comps
+					}
+					fail(fmt.Errorf("list block volumes: %w", err))
 					return
 				}
-				for _, bv := range bvResp.Items {
-					if bv.LifecycleState != core.BootVolumeLifecycleStateTerminated && bv.LifecycleState != core.BootVolumeLifecycleStateTerminating {
-						localStorage += Int64Val(bv.SizeInGBs)
+				for _, vol := range volResp.Items {
+					if vol.LifecycleState != core.VolumeLifecycleStateTerminated && vol.LifecycleState != core.VolumeLifecycleStateTerminating {
+						localStorage += Int64Val(vol.SizeInGBs)
 					}
 				}
-				if bvResp.OpcNextPage == nil {
+				if volResp.OpcNextPage == nil {
 					break
 				}
-				bvReq.Page = bvResp.OpcNextPage
+				volReq.Page = volResp.OpcNextPage
 			}
-		}
-
-		volReq := core.ListVolumesRequest{
-			CompartmentId: common.String(profile.TenancyOCID),
-			Limit:         common.Int(100),
-		}
-		for {
-			volResp, err := blockClient.ListVolumes(ctx, volReq)
-			if err != nil {
-				fail(fmt.Errorf("list block volumes: %w", err))
-				return
-			}
-			for _, vol := range volResp.Items {
-				if vol.LifecycleState != core.VolumeLifecycleStateTerminated && vol.LifecycleState != core.VolumeLifecycleStateTerminating {
-					localStorage += Int64Val(vol.SizeInGBs)
-				}
-			}
-			if volResp.OpcNextPage == nil {
-				break
-			}
-			volReq.Page = volResp.OpcNextPage
 		}
 
 		mu.Lock()

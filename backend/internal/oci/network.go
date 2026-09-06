@@ -50,6 +50,7 @@ var CloudflareCIDRs = []struct {
 
 type VCNItem struct {
 	OCID        string `json:"ocid"`
+	Compartment string `json:"compartment"` // "root" or the sub-compartment name
 	DisplayName string `json:"display_name"`
 	CidrBlock   string `json:"cidr_block"`
 	Ipv6Enabled bool   `json:"ipv6_enabled"`
@@ -215,90 +216,101 @@ func DeleteSecurityRule(ctx context.Context, profile *storage.OCIProfile, region
 	return removed, nil
 }
 
-// ListVCNs lists VCNs in the tenancy root compartment (all pages)
+// ListVCNs lists VCNs in every compartment of the tenancy (all pages)
 func ListVCNs(ctx context.Context, profile *storage.OCIProfile, region string) ([]VCNItem, error) {
 	netClient, err := GetVirtualNetworkClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
 
-	req := core.ListVcnsRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		Limit:         common.Int(100),
-	}
-
 	var items []VCNItem
-	for {
-		resp, err := netClient.ListVcns(ctx, req)
-		if err != nil {
-			return nil, err
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		req := core.ListVcnsRequest{
+			CompartmentId: common.String(comp.ID),
+			Limit:         common.Int(100),
 		}
-		for _, vcn := range resp.Items {
-			if vcn.LifecycleState == core.VcnLifecycleStateTerminated || vcn.LifecycleState == core.VcnLifecycleStateTerminating {
-				continue
+		for {
+			resp, err := netClient.ListVcns(ctx, req)
+			if err != nil {
+				if skipUnreadableCompartment(comp, profile, err) {
+					continue comps
+				}
+				return nil, err
 			}
-			items = append(items, VCNItem{
-				OCID:        StrVal(vcn.Id),
-				DisplayName: StrVal(vcn.DisplayName),
-				CidrBlock:   StrVal(vcn.CidrBlock),
-				Ipv6Enabled: len(vcn.Ipv6CidrBlocks) > 0,
-				State:       string(vcn.LifecycleState),
-			})
+			for _, vcn := range resp.Items {
+				if vcn.LifecycleState == core.VcnLifecycleStateTerminated || vcn.LifecycleState == core.VcnLifecycleStateTerminating {
+					continue
+				}
+				items = append(items, VCNItem{
+					Compartment: comp.Name,
+					OCID:        StrVal(vcn.Id),
+					DisplayName: StrVal(vcn.DisplayName),
+					CidrBlock:   StrVal(vcn.CidrBlock),
+					Ipv6Enabled: len(vcn.Ipv6CidrBlocks) > 0,
+					State:       string(vcn.LifecycleState),
+				})
+			}
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
 		}
-		if resp.OpcNextPage == nil {
-			break
-		}
-		req.Page = resp.OpcNextPage
 	}
 
 	return items, nil
 }
 
-// ListSubnets lists subnets for a VCN (all pages)
+// ListSubnets lists subnets for a VCN (all pages, all compartments)
 func ListSubnets(ctx context.Context, profile *storage.OCIProfile, region, vcnID string) ([]SubnetItem, error) {
 	netClient, err := GetVirtualNetworkClient(profile, region)
 	if err != nil {
 		return nil, err
 	}
 
-	req := core.ListSubnetsRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		VcnId:         common.String(vcnID),
-		Limit:         common.Int(100),
-	}
-
 	var items []SubnetItem
-	for {
-		resp, err := netClient.ListSubnets(ctx, req)
-		if err != nil {
-			return nil, err
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		req := core.ListSubnetsRequest{
+			CompartmentId: common.String(comp.ID),
+			VcnId:         common.String(vcnID),
+			Limit:         common.Int(100),
 		}
-		for _, sub := range resp.Items {
-			if sub.LifecycleState == core.SubnetLifecycleStateTerminated || sub.LifecycleState == core.SubnetLifecycleStateTerminating {
-				continue
+		for {
+			resp, err := netClient.ListSubnets(ctx, req)
+			if err != nil {
+				if skipUnreadableCompartment(comp, profile, err) {
+					continue comps
+				}
+				return nil, err
 			}
-			secListID := ""
-			if len(sub.SecurityListIds) > 0 {
-				secListID = sub.SecurityListIds[0]
+			for _, sub := range resp.Items {
+				if sub.LifecycleState == core.SubnetLifecycleStateTerminated || sub.LifecycleState == core.SubnetLifecycleStateTerminating {
+					continue
+				}
+				secListID := ""
+				if len(sub.SecurityListIds) > 0 {
+					secListID = sub.SecurityListIds[0]
+				}
+				ipv6 := StrVal(sub.Ipv6CidrBlock)
+				if ipv6 == "" && len(sub.Ipv6CidrBlocks) > 0 {
+					ipv6 = sub.Ipv6CidrBlocks[0]
+				}
+				items = append(items, SubnetItem{
+					OCID:           StrVal(sub.Id),
+					DisplayName:    StrVal(sub.DisplayName),
+					VcnID:          StrVal(sub.VcnId),
+					CidrBlock:      StrVal(sub.CidrBlock),
+					Ipv6CidrBlock:  ipv6,
+					SecurityListID: secListID,
+					State:          string(sub.LifecycleState),
+				})
 			}
-			ipv6 := StrVal(sub.Ipv6CidrBlock)
-			if ipv6 == "" && len(sub.Ipv6CidrBlocks) > 0 {
-				ipv6 = sub.Ipv6CidrBlocks[0]
+			if resp.OpcNextPage == nil {
+				break
 			}
-			items = append(items, SubnetItem{
-				OCID:           StrVal(sub.Id),
-				DisplayName:    StrVal(sub.DisplayName),
-				VcnID:          StrVal(sub.VcnId),
-				CidrBlock:      StrVal(sub.CidrBlock),
-				Ipv6CidrBlock:  ipv6,
-				SecurityListID: secListID,
-				State:          string(sub.LifecycleState),
-			})
+			req.Page = resp.OpcNextPage
 		}
-		if resp.OpcNextPage == nil {
-			break
-		}
-		req.Page = resp.OpcNextPage
 	}
 
 	return items, nil

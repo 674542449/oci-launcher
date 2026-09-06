@@ -74,40 +74,46 @@ func ListBootVolumes(ctx context.Context, profile *storage.OCIProfile, region st
 	}
 
 	items := []BootVolumeItem{}
-	for _, ad := range adNames {
-		req := core.ListBootVolumesRequest{
-			AvailabilityDomain: common.String(ad),
-			CompartmentId:      common.String(profile.TenancyOCID),
-			Limit:              common.Int(100),
-		}
-		for {
-			resp, err := blockClient.ListBootVolumes(ctx, req)
-			if err != nil {
-				return nil, fmt.Errorf("failed to list boot volumes in %s: %w", ad, err)
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		for _, ad := range adNames {
+			req := core.ListBootVolumesRequest{
+				AvailabilityDomain: common.String(ad),
+				CompartmentId:      common.String(comp.ID),
+				Limit:              common.Int(100),
 			}
-			for _, bv := range resp.Items {
-				if bv.LifecycleState == core.BootVolumeLifecycleStateTerminated {
-					continue
+			for {
+				resp, err := blockClient.ListBootVolumes(ctx, req)
+				if err != nil {
+					if skipUnreadableCompartment(comp, profile, err) {
+						continue comps
+					}
+					return nil, fmt.Errorf("failed to list boot volumes in %s: %w", ad, err)
 				}
-				vpu := Int64Val(bv.VpusPerGB)
-				if bv.VpusPerGB == nil {
-					vpu = 10
+				for _, bv := range resp.Items {
+					if bv.LifecycleState == core.BootVolumeLifecycleStateTerminated {
+						continue
+					}
+					vpu := Int64Val(bv.VpusPerGB)
+					if bv.VpusPerGB == nil {
+						vpu = 10
+					}
+					items = append(items, BootVolumeItem{
+						OCID:         StrVal(bv.Id),
+						DisplayName:  StrVal(bv.DisplayName),
+						SizeInGBs:    Int64Val(bv.SizeInGBs),
+						VpusPerGB:    vpu,
+						State:        string(bv.LifecycleState),
+						AD:           StrVal(bv.AvailabilityDomain),
+						TimeCreated:  fmtTime(bv.TimeCreated),
+						GrowCommands: growCommands,
+					})
 				}
-				items = append(items, BootVolumeItem{
-					OCID:         StrVal(bv.Id),
-					DisplayName:  StrVal(bv.DisplayName),
-					SizeInGBs:    Int64Val(bv.SizeInGBs),
-					VpusPerGB:    vpu,
-					State:        string(bv.LifecycleState),
-					AD:           StrVal(bv.AvailabilityDomain),
-					TimeCreated:  fmtTime(bv.TimeCreated),
-					GrowCommands: growCommands,
-				})
+				if resp.OpcNextPage == nil {
+					break
+				}
+				req.Page = resp.OpcNextPage
 			}
-			if resp.OpcNextPage == nil {
-				break
-			}
-			req.Page = resp.OpcNextPage
 		}
 	}
 
@@ -155,35 +161,40 @@ func ListBlockVolumes(ctx context.Context, profile *storage.OCIProfile, region s
 		return nil, err
 	}
 
-	req := core.ListVolumesRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		Limit:         common.Int(100),
-	}
-
 	items := []BlockVolumeItem{}
-	for {
-		resp, err := blockClient.ListVolumes(ctx, req)
-		if err != nil {
-			return nil, err
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		req := core.ListVolumesRequest{
+			CompartmentId: common.String(comp.ID),
+			Limit:         common.Int(100),
 		}
-		for _, vol := range resp.Items {
-			if vol.LifecycleState == core.VolumeLifecycleStateTerminated {
-				continue
+		for {
+			resp, err := blockClient.ListVolumes(ctx, req)
+			if err != nil {
+				if skipUnreadableCompartment(comp, profile, err) {
+					continue comps
+				}
+				return nil, err
 			}
-			items = append(items, BlockVolumeItem{
-				OCID:        StrVal(vol.Id),
-				DisplayName: StrVal(vol.DisplayName),
-				SizeInGBs:   Int64Val(vol.SizeInGBs),
-				VpusPerGB:   Int64Val(vol.VpusPerGB),
-				State:       string(vol.LifecycleState),
-				AD:          StrVal(vol.AvailabilityDomain),
-				TimeCreated: fmtTime(vol.TimeCreated),
-			})
+			for _, vol := range resp.Items {
+				if vol.LifecycleState == core.VolumeLifecycleStateTerminated {
+					continue
+				}
+				items = append(items, BlockVolumeItem{
+					OCID:        StrVal(vol.Id),
+					DisplayName: StrVal(vol.DisplayName),
+					SizeInGBs:   Int64Val(vol.SizeInGBs),
+					VpusPerGB:   Int64Val(vol.VpusPerGB),
+					State:       string(vol.LifecycleState),
+					AD:          StrVal(vol.AvailabilityDomain),
+					TimeCreated: fmtTime(vol.TimeCreated),
+				})
+			}
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
 		}
-		if resp.OpcNextPage == nil {
-			break
-		}
-		req.Page = resp.OpcNextPage
 	}
 
 	return items, nil
@@ -231,23 +242,28 @@ func ListBuckets(ctx context.Context, profile *storage.OCIProfile, region string
 		return nil, err
 	}
 
-	req := objectstorage.ListBucketsRequest{
-		NamespaceName: common.String(namespace),
-		CompartmentId: common.String(profile.TenancyOCID),
-		Limit:         common.Int(100),
-	}
-
 	var summaries []objectstorage.BucketSummary
-	for {
-		resp, err := osClient.ListBuckets(ctx, req)
-		if err != nil {
-			return nil, err
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		req := objectstorage.ListBucketsRequest{
+			NamespaceName: common.String(namespace),
+			CompartmentId: common.String(comp.ID),
+			Limit:         common.Int(100),
 		}
-		summaries = append(summaries, resp.Items...)
-		if resp.OpcNextPage == nil {
-			break
+		for {
+			resp, err := osClient.ListBuckets(ctx, req)
+			if err != nil {
+				if skipUnreadableCompartment(comp, profile, err) {
+					continue comps
+				}
+				return nil, err
+			}
+			summaries = append(summaries, resp.Items...)
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
 		}
-		req.Page = resp.OpcNextPage
 	}
 
 	items := make([]BucketItem, 0, len(summaries))

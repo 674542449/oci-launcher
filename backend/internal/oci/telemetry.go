@@ -36,7 +36,8 @@ func GetMonthlyOutboundTraffic(ctx context.Context, profile *storage.OCIProfile,
 	startOfMonth := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
 
 	req := monitoring.SummarizeMetricsDataRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
+		CompartmentId:          common.String(profile.TenancyOCID),
+		CompartmentIdInSubtree: common.Bool(true), // VNICs in sub-compartments count too
 		SummarizeMetricsDataDetails: monitoring.SummarizeMetricsDataDetails{
 			Namespace:  common.String("oci_vcn"),
 			Query:      common.String("VnicToNetworkBytes[1d].sum()"),

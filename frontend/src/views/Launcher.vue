@@ -486,7 +486,7 @@ const loadNetworks = async () => {
   loadingNets.value = true
   try {
     const res: any = await api.get(`/network/vcns?profile_id=${profileStore.activeProfileId}`)
-    vcnOptions.value = (res.vcns || []).map((v: any) => ({ label: `${v.display_name} (${v.cidr_block})`, value: v.ocid }))
+    vcnOptions.value = (res.vcns || []).map((v: any) => ({ label: `${v.display_name} (${v.cidr_block})${v.compartment && v.compartment !== 'root' ? ' · ' + v.compartment : ''}`, value: v.ocid }))
     if (vcnOptions.value.length > 0) {
       selectedVCN.value = vcnOptions.value[0].value
       await onVCNChange()

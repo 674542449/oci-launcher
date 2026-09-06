@@ -47,7 +47,9 @@
               <td class="min-w-[220px]">
                 <div class="text-[14px] font-semibold text-ink">{{ inst.display_name }}</div>
                 <div class="mono mt-0.5 text-xs text-ink-3" :title="inst.ocid">{{ maskOCID(inst.ocid) }}</div>
-                <div class="mono mt-0.5 text-xs text-ink-3">{{ shortAD(inst.ad) }} · {{ formatDate(inst.time_created) }}</div>
+                <div class="mono mt-0.5 text-xs text-ink-3">
+                  {{ shortAD(inst.ad) }} · {{ formatDate(inst.time_created) }}<span v-if="inst.compartment && inst.compartment !== 'root'"> · 区间 {{ inst.compartment }}</span>
+                </div>
               </td>
               <td><StatusPill :state="inst.state" /></td>
               <td class="whitespace-nowrap">

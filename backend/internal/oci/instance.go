@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 
 type InstanceItem struct {
 	OCID         string            `json:"ocid"`
+	Compartment  string            `json:"compartment"` // "root" or the sub-compartment name
 	DisplayName  string            `json:"display_name"`
 	Shape        string            `json:"shape"`
 	OCPU         float32           `json:"ocpu"`
@@ -73,7 +75,17 @@ func primaryVnic(ctx context.Context, computeClient core.ComputeClient, netClien
 	return core.Vnic{}, fmt.Errorf("no attached VNIC found for instance %s", instanceOCID)
 }
 
-// ListInstancesWithDetails retrieves instances (all pages) with primary VNIC details and the root password tag
+// instanceCompartment returns the compartment an instance lives in. VNIC attachments are listed
+// per compartment, so the tenancy root would miss instances created in a sub-compartment.
+func instanceCompartment(ctx context.Context, computeClient core.ComputeClient, profile *storage.OCIProfile, instanceOCID string) string {
+	resp, err := computeClient.GetInstance(ctx, core.GetInstanceRequest{InstanceId: common.String(instanceOCID)})
+	if err != nil || resp.Instance.CompartmentId == nil || *resp.Instance.CompartmentId == "" {
+		return profile.TenancyOCID
+	}
+	return *resp.Instance.CompartmentId
+}
+
+// ListInstancesWithDetails retrieves instances (all pages, all compartments) with primary VNIC details and the root password tag
 func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, region string) ([]InstanceItem, error) {
 	computeClient, err := GetComputeClient(profile, region)
 	if err != nil {
@@ -84,33 +96,54 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 		return nil, err
 	}
 
-	req := core.ListInstancesRequest{
-		CompartmentId: common.String(profile.TenancyOCID),
-		SortBy:        core.ListInstancesSortByTimecreated,
-		SortOrder:     core.ListInstancesSortOrderDesc,
-		Limit:         common.Int(100),
+	// Instances created from the OCI console often live in a sub-compartment: cover them all.
+	type located struct {
+		inst core.Instance
+		comp Compartment
 	}
-
-	var instances []core.Instance
-	for {
-		resp, err := computeClient.ListInstances(ctx, req)
-		if err != nil {
-			return nil, err
+	var instances []located
+comps:
+	for _, comp := range ListCompartments(ctx, profile) {
+		req := core.ListInstancesRequest{
+			CompartmentId: common.String(comp.ID),
+			SortBy:        core.ListInstancesSortByTimecreated,
+			SortOrder:     core.ListInstancesSortOrderDesc,
+			Limit:         common.Int(100),
 		}
-		instances = append(instances, resp.Items...)
-		if resp.OpcNextPage == nil {
-			break
+		for {
+			resp, err := computeClient.ListInstances(ctx, req)
+			if err != nil {
+				if skipUnreadableCompartment(comp, profile, err) {
+					continue comps
+				}
+				return nil, err
+			}
+			for _, inst := range resp.Items {
+				instances = append(instances, located{inst: inst, comp: comp})
+			}
+			if resp.OpcNextPage == nil {
+				break
+			}
+			req.Page = resp.OpcNextPage
 		}
-		req.Page = resp.OpcNextPage
 	}
+	sort.SliceStable(instances, func(i, j int) bool {
+		ti, tj := instances[i].inst.TimeCreated, instances[j].inst.TimeCreated
+		if ti == nil || tj == nil {
+			return ti != nil
+		}
+		return ti.Time.After(tj.Time)
+	})
 
 	items := make([]InstanceItem, 0, len(instances))
-	for _, inst := range instances {
+	for _, li := range instances {
+		inst := li.inst
 		if inst.LifecycleState == core.InstanceLifecycleStateTerminated {
 			continue
 		}
 
 		item := InstanceItem{
+			Compartment:  li.comp.Name,
 			OCID:         StrVal(inst.Id),
 			DisplayName:  StrVal(inst.DisplayName),
 			Shape:        StrVal(inst.Shape),
@@ -138,7 +171,7 @@ func ListInstancesWithDetails(ctx context.Context, profile *storage.OCIProfile, 
 
 		// Terminating instances have no usable VNIC; skip the extra calls.
 		if inst.LifecycleState != core.InstanceLifecycleStateTerminating && inst.Id != nil {
-			if vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, *inst.Id); err == nil {
+			if vnic, err := primaryVnic(ctx, computeClient, netClient, li.comp.ID, *inst.Id); err == nil {
 				item.PublicIP = StrVal(vnic.PublicIp)
 				item.PrivateIP = StrVal(vnic.PrivateIp)
 				if len(vnic.Ipv6Addresses) > 0 {
@@ -439,7 +472,7 @@ func RotatePublicIP(ctx context.Context, profile *storage.OCIProfile, region, in
 		return "", err
 	}
 
-	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	vnic, err := primaryVnic(ctx, computeClient, netClient, instanceCompartment(ctx, computeClient, profile, instanceOCID), instanceOCID)
 	if err != nil {
 		return "", fmt.Errorf("unable to find VNIC for instance: %w", err)
 	}
@@ -539,7 +572,7 @@ func AttachIPv6ToInstance(ctx context.Context, profile *storage.OCIProfile, regi
 		return "", err
 	}
 
-	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	vnic, err := primaryVnic(ctx, computeClient, netClient, instanceCompartment(ctx, computeClient, profile, instanceOCID), instanceOCID)
 	if err != nil {
 		return "", fmt.Errorf("unable to find VNIC for instance: %w", err)
 	}
@@ -567,7 +600,7 @@ func GetPrimaryVnicAddresses(ctx context.Context, profile *storage.OCIProfile, r
 	if err != nil {
 		return "", "", err
 	}
-	vnic, err := primaryVnic(ctx, computeClient, netClient, profile.TenancyOCID, instanceOCID)
+	vnic, err := primaryVnic(ctx, computeClient, netClient, instanceCompartment(ctx, computeClient, profile, instanceOCID), instanceOCID)
 	if err != nil {
 		return "", "", err
 	}
