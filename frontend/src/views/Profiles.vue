@@ -42,7 +42,7 @@
         <div class="flex items-start justify-between gap-3">
           <div class="min-w-0">
             <div class="flex items-center gap-2">
-              <span class="text-xl leading-none" :title="regionCountry(p.region)" aria-hidden="true">{{ regionFlag(p.region) }}</span>
+              <Flag :region="p.region" class="h-5 w-[30px]" />
               <h2 class="truncate text-[15px] font-semibold text-ink">{{ p.name }}</h2>
               <span v-if="p.id === profileStore.activeProfileId" class="pill pill-info">当前</span>
             </div>
@@ -182,7 +182,8 @@ import { AddOutline, FolderOpenOutline, SearchOutline, InformationCircleOutline,
 import { useProfileStore } from '@/stores/profile'
 import type { OCIProfile } from '@/stores/profile'
 import { api } from '@/api/client'
-import { regionLabel, regionCountry, regionFlag, countryName } from '@/lib/regions'
+import { regionLabel, regionCountry, countryName } from '@/lib/regions'
+import Flag from '@/components/Flag.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusPill from '@/components/StatusPill.vue'
 import EmptyState from '@/components/EmptyState.vue'

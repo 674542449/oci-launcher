@@ -74,7 +74,8 @@ import {
 } from '@vicons/ionicons5'
 import { useProfileStore } from '@/stores/profile'
 import { api } from '@/api/client'
-import { regionLabel, regionFlag } from '@/lib/regions'
+import { regionLabel } from '@/lib/regions'
+import Flag from '@/components/Flag.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -97,7 +98,7 @@ const navItems = [
 ]
 
 const profileOptions = computed(() =>
-  profileStore.profiles.map((p) => ({ label: `${regionFlag(p.region)} ${p.name} · ${regionLabel(p.region)}`.trim(), value: p.id })),
+  profileStore.profiles.map((p) => ({ label: `${p.name} · ${regionLabel(p.region)}`, value: p.id, region: p.region })),
 )
 const activeProfile = computed(() => profileStore.profiles.find((p) => p.id === profileStore.activeProfileId))
 
@@ -203,6 +204,11 @@ const SideNav = defineComponent({
                   loading: profileStore.loading,
                   placeholder: '尚未导入账号',
                   size: 'medium',
+                  renderLabel: (opt: any) =>
+                    h('span', { class: 'inline-flex items-center gap-2 min-w-0' }, [
+                      h(Flag, { region: opt.region, class: 'h-3.5 w-[21px]' }),
+                      h('span', { class: 'truncate' }, opt.label),
+                    ]),
                   'onUpdate:value': onProfileChange,
                 }),
             },
