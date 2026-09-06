@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"oci-panel/internal/auth"
 	"oci-panel/internal/storage"
 
 	"github.com/gin-gonic/gin"
@@ -47,8 +48,5 @@ func profileFromIDString(c *gin.Context, raw string) (storage.OCIProfile, bool) 
 
 // isRequestSecure reports whether the client reached us over HTTPS (directly or via a proxy).
 func isRequestSecure(c *gin.Context) bool {
-	if c.Request.TLS != nil {
-		return true
-	}
-	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+	return auth.IsRequestSecure(c)
 }

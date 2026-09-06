@@ -66,6 +66,10 @@
 
           <!-- ===== Normal login: password, then one-time code ===== -->
           <template v-else>
+            <div v-if="sessionExpired" class="notice notice-warn mb-4">
+              <n-icon size="18" class="mt-0.5 shrink-0"><WarningOutline /></n-icon>
+              <span>登录已过期，请重新登录。</span>
+            </div>
             <ol class="mb-5 flex items-center gap-2 text-xs" aria-label="登录步骤">
               <li class="flex items-center gap-1.5" :class="step === 1 ? 'text-ink font-medium' : 'text-ink-3'">
                 <span class="mono inline-flex h-5 w-5 items-center justify-center rounded-full border text-[11px]" :class="step === 1 ? 'border-ink text-ink' : 'border-line text-ink-3'">1</span>
@@ -125,14 +129,16 @@
 
 <script setup lang="ts">
 import { ref, onMounted, nextTick } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { NForm, NFormItem, NInput, NButton, NIcon, useMessage } from 'naive-ui'
 import { WarningOutline } from '@vicons/ionicons5'
 import { api } from '@/api/client'
 import QRCode from 'qrcode'
 
 const router = useRouter()
+const route = useRoute()
 const message = useMessage()
+const sessionExpired = ref(route.query.expired === '1')
 
 const isUninitialized = ref(false)
 const bootstrapDone = ref(false)

@@ -215,9 +215,9 @@ func Verify2FAStep2(c *gin.Context) {
 	// Clear login failure counter
 	cache.ResetLoginFailures(ctx, clientIP)
 
-	// HttpOnly, SameSite=Strict; Secure whenever the client came in over HTTPS
-	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie("oci_auth_token", token, 86400, "/", "", isRequestSecure(c), true)
+	// HttpOnly, SameSite=Strict; Secure whenever the client came in over HTTPS. The token slides:
+	// RequireAuth reissues it on use, so only SessionTokenLifetime of inactivity ends the session.
+	auth.SetSessionCookie(c, token, int(auth.SessionTokenLifetime.Seconds()))
 
 	storage.LogAudit("LOGIN_SUCCESS", user.Username, c.ClientIP(), c.GetHeader("User-Agent"), "Logged in with 2FA successfully", "SUCCESS")
 
@@ -235,13 +235,11 @@ func Verify2FAStep2(c *gin.Context) {
 func Logout(c *gin.Context) {
 	if jtiVal, exists := c.Get("tokenJTI"); exists {
 		if jti, ok := jtiVal.(string); ok {
-			_ = cache.BlacklistJTI(c.Request.Context(), jti, 24*time.Hour)
+			_ = cache.BlacklistJTI(c.Request.Context(), jti, auth.SessionTokenLifetime)
 		}
 	}
 
-	// Clear Cookie
-	c.SetSameSite(http.SameSiteStrictMode)
-	c.SetCookie("oci_auth_token", "", -1, "/", "", isRequestSecure(c), true)
+	auth.ClearSessionCookie(c)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }

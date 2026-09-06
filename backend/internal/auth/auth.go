@@ -26,38 +26,111 @@ type CustomClaims struct {
 	TokenVersion      int    `json:"ver"`
 	DeviceFingerprint string `json:"dfp"`
 	Is2FAVerified     bool   `json:"fa"`
+	SessionStart      int64  `json:"sst,omitempty"` // unix time of the original login (sliding session)
 	jwt.RegisteredClaims
 }
+
+const (
+	// SessionCookieName carries the session token as an HttpOnly cookie.
+	SessionCookieName = "oci_auth_token"
+	// SessionTokenLifetime is the idle cap: a token that goes unused this long expires.
+	SessionTokenLifetime = 7 * 24 * time.Hour
+	// sessionAbsoluteMax is the hard cap counted from the original login; renewal stops there.
+	sessionAbsoluteMax = 30 * 24 * time.Hour
+	// sessionRenewAfter: a token older than this is reissued on its next use, so an active user
+	// is never logged out by the idle cap.
+	sessionRenewAfter = time.Hour
+)
 
 func getJWTSecret() []byte {
 	hash := sha256.Sum256([]byte(config.GlobalConfig.MasterKey + "|jwt-signing-salt"))
 	return hash[:]
 }
 
-// GenerateFullJWT issues the final authenticated JWT
+// GenerateFullJWT issues the authenticated session token for a fresh login.
 func GenerateFullJWT(user *storage.User, userAgent, clientIP string) (string, string, error) {
-	jti := uuid.New().String()
-	dfp := security.GenerateDeviceFingerprint(userAgent, clientIP)
+	token, jti, _, err := issueSessionToken(user, userAgent, clientIP, time.Now())
+	return token, jti, err
+}
 
+// issueSessionToken signs a session token that expires after SessionTokenLifetime, but never
+// later than sessionAbsoluteMax after the session's original login.
+func issueSessionToken(user *storage.User, userAgent, clientIP string, sessionStart time.Time) (string, string, time.Time, error) {
+	now := time.Now()
+	exp := now.Add(SessionTokenLifetime)
+	if hard := sessionStart.Add(sessionAbsoluteMax); hard.Before(exp) {
+		exp = hard
+	}
+	if !exp.After(now.Add(time.Minute)) {
+		return "", "", time.Time{}, errors.New("session reached its absolute lifetime")
+	}
+
+	jti := uuid.New().String()
 	claims := CustomClaims{
 		UserID:            user.ID,
 		Username:          user.Username,
 		TokenVersion:      user.TokenVersion,
-		DeviceFingerprint: dfp,
+		DeviceFingerprint: security.GenerateDeviceFingerprint(userAgent, clientIP),
 		Is2FAVerified:     true,
+		SessionStart:      sessionStart.Unix(),
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			Issuer:    "oci-panel-backend",
 			Subject:   fmt.Sprintf("%d", user.ID),
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
-			NotBefore: jwt.NewNumericDate(time.Now()),
+			ExpiresAt: jwt.NewNumericDate(exp),
+			IssuedAt:  jwt.NewNumericDate(now),
+			NotBefore: jwt.NewNumericDate(now),
 		},
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signedToken, err := token.SignedString(getJWTSecret())
-	return signedToken, jti, err
+	return signedToken, jti, exp, err
+}
+
+func sessionStartOf(claims *CustomClaims) time.Time {
+	if claims.SessionStart > 0 {
+		return time.Unix(claims.SessionStart, 0)
+	}
+	if claims.IssuedAt != nil {
+		return claims.IssuedAt.Time
+	}
+	return time.Now()
+}
+
+// renewSessionIfDue reissues the session token once it is older than sessionRenewAfter. The new
+// token goes out as the cookie and in the X-Refreshed-Token header (the SPA stores it); the old
+// one stays valid until its own expiry so requests already in flight are not cut off.
+func renewSessionIfDue(c *gin.Context, user *storage.User, claims *CustomClaims) {
+	if claims.IssuedAt == nil || time.Since(claims.IssuedAt.Time) < sessionRenewAfter {
+		return
+	}
+	token, _, exp, err := issueSessionToken(user, c.GetHeader("User-Agent"), c.ClientIP(), sessionStartOf(claims))
+	if err != nil {
+		return // past the absolute cap: let the current token run out
+	}
+	SetSessionCookie(c, token, int(time.Until(exp).Seconds()))
+	c.Header("X-Refreshed-Token", token)
+}
+
+// IsRequestSecure reports whether the client reached us over HTTPS (directly or via a proxy).
+func IsRequestSecure(c *gin.Context) bool {
+	if c.Request.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(c.GetHeader("X-Forwarded-Proto"), "https")
+}
+
+// SetSessionCookie writes the HttpOnly, SameSite=Strict session cookie (Secure over HTTPS).
+func SetSessionCookie(c *gin.Context, token string, maxAge int) {
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(SessionCookieName, token, maxAge, "/", "", IsRequestSecure(c), true)
+}
+
+// ClearSessionCookie deletes the session cookie.
+func ClearSessionCookie(c *gin.Context) {
+	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetCookie(SessionCookieName, "", -1, "/", "", IsRequestSecure(c), true)
 }
 
 // GenerateTemp2FAToken generates temporary token for 2FA challenge step
@@ -126,13 +199,13 @@ func VerifyTOTPCode(secret, code string) bool {
 	return err == nil && valid
 }
 
-// RequireAuth middleware verifies JWT and device fingerprint
+// RequireAuth middleware verifies the JWT and the browser fingerprint, then slides the session
 func RequireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var tokenStr string
 
 		// Check HttpOnly Cookie first
-		if cookie, err := c.Cookie("oci_auth_token"); err == nil && cookie != "" {
+		if cookie, err := c.Cookie(SessionCookieName); err == nil && cookie != "" {
 			tokenStr = cookie
 		} else {
 			// Check Authorization Header fallback
@@ -185,6 +258,7 @@ func RequireAuth() gin.HandlerFunc {
 
 		c.Set("currentUser", &user)
 		c.Set("tokenJTI", claims.ID)
+		renewSessionIfDue(c, &user, claims)
 		c.Next()
 	}
 }

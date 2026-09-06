@@ -32,7 +32,7 @@
 ### 5. 军事级网络与系统安全防御
 - **SQL 注入零容忍**：100% 采用 GORM 参数化预编译查询，杜绝任何 SQL 拼接。
 - **XSS 与 CSRF 双重硬锁**：全站严格 Content-Security-Policy，Vue 3 自动转义，Cookie 采用 `HttpOnly + SameSite=Strict`，配合 `X-CSRF-Token` 双重防御。
-- **JWT 伪造防御**：HMAC-SHA256 强随机密钥签名，载荷严格绑定客户端设备指纹（UA + 浏览器特征 Hash），IP/设备突变立即失效。
+- **JWT 伪造防御**：HMAC-SHA256 签名（密钥由 MASTER_KEY 派生），载荷绑定浏览器 UA 指纹；会话滑动续期，7 天未使用才过期，单次登录最长 30 天，退出登录即时吊销。
 - **2FA (TOTP) 防重放**：支持 Google Authenticator / Aegis / Bitwarden。采用恒定时间比对（`subtle.ConstantTimeCompare`），Redis 记录 Token 窗口唯一性防重放。
 - **自动化诱捕蜜罐与 Fail2ban**：预设 `/phpmyadmin`、`/.env`、`/actuator` 等 10+ 诱捕端点，恶意扫描触发直接将 IP 加入 Redis 黑名单，并阶梯式延长封锁时间（10分钟 ~ 永久）。
 - **扫描器特征绞杀与指纹隐形**：自动阻断 sqlmap、nmap、nikto、masscan、fofa 等探测流量；全面剥离 Server 头与 X-Powered-By 特征。

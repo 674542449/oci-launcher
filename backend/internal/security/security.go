@@ -109,15 +109,12 @@ func ConstantTimeCompare(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// GenerateDeviceFingerprint generates SHA256 fingerprint from user agent and client IP
-func GenerateDeviceFingerprint(userAgent, clientIP string) string {
-	// Use IP /24 subnet to tolerate minor mobile dynamic IP shift
-	ipParts := strings.Split(clientIP, ".")
-	subnet := clientIP
-	if len(ipParts) == 4 {
-		subnet = fmt.Sprintf("%s.%s.%s.0", ipParts[0], ipParts[1], ipParts[2])
-	}
-	raw := fmt.Sprintf("%s|%s", strings.TrimSpace(userAgent), subnet)
+// GenerateDeviceFingerprint hashes the browser's User-Agent. The client IP is deliberately not
+// part of it: Wi-Fi/mobile switches and rotating IPv6 privacy addresses were logging users out,
+// while IP binding adds little on top of TOTP and the token blacklist. The parameter is kept so
+// callers do not change.
+func GenerateDeviceFingerprint(userAgent, _ string) string {
+	raw := "ua|" + strings.TrimSpace(userAgent)
 	hash := sha256.Sum256([]byte(raw))
 	return hex.EncodeToString(hash[:])
 }
